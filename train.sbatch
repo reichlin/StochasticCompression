@@ -5,4 +5,5 @@
 #SBATCH --constrain="rivendell|khazadum"
 #SBATCH --time=48:00:00
 
+conda activate victor_test
 python train.py ${SLURMD_NODENAME} ${GAMMA} ${DEPTH}
