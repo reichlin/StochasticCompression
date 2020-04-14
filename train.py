@@ -224,7 +224,8 @@ def main():
 
     ''' TENSORBOARD WRITER '''
 
-    log_dir = '/Midgard/home/areichlin/compression/debug_log/two_opt_adam_z_detach_gamma_'+str(gamma)+'_depth_'+str(model_depth)
+    #/Midgard/home/areichlin/compression
+    log_dir = './debug_log/two_opt_adam_z_detach_gamma_'+str(gamma)+'_depth_'+str(model_depth)
     writer = SummaryWriter(log_dir=log_dir)
 
     ''' OPTIMIZER, SCHEDULER DEFINITION '''
