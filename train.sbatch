@@ -5,5 +5,7 @@
 #SBATCH --constrain="rivendell|khazadum"
 #SBATCH --time=48:00:00
 
+source "/Midgard/home/pshi/miniconda3/etc/profile.d/conda.sh"
 conda activate victor_test
+
 python train.py ${SLURMD_NODENAME} ${GAMMA} ${DEPTH}

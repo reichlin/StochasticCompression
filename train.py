@@ -167,6 +167,11 @@ def print_RD_curve(model, test_loader, idx_v, writer, device):
 
 def main():
 
+    print(sys.argv[0])
+    print(sys.argv[1])
+    print(sys.argv[2])
+    print(sys.argv[3])
+
     torch.manual_seed(1234)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
