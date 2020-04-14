@@ -73,7 +73,7 @@ class BodyModel(nn.Module):
 
 class Net(nn.Module):
 
-    def __init__(self, min_accuracy, colors, depth, model_size, n, L):
+    def __init__(self, min_accuracy, colors, depth, model_size, n, L, device):
         super(Net, self).__init__()
 
         # constants for the architecture of the model
@@ -81,6 +81,8 @@ class Net(nn.Module):
         self.min_accuracy = min_accuracy
         self.depth = depth
         self.colors = colors
+
+        self.device = device
 
         # constants for the quantization step
         self.L = L
@@ -142,14 +144,14 @@ class Net(nn.Module):
         a = F.relu(self.BNa1(self.a_conv1(z0)))
         a = F.relu(self.BNa2(self.a_conv2(a)))
         a = self.a_conv3(a)
-        a = a + z
+        a = a + z.detach()
         a = F.relu(self.BNa3(self.a_conv4(a)))
         a = F.relu(self.BNa4(self.a_conv5(a)))
         a = torch.squeeze(self.a_conv6(a))
 
         mu = torch.sigmoid(a)  # [B, H, W] each value between [0, 1], policy of the agent
 
-        return z, mu, a
+        return z0, z, mu, a
 
     def D(self, z):
 
@@ -207,7 +209,7 @@ class Net(nn.Module):
 
     def forward(self, x):
 
-        z, mu, a = self.E(x)  # encoder
+        z0, z, mu, a = self.E(x)  # encoder
 
         k, log_pk = self.sample_k(mu)  # sample k from mu
 
@@ -217,7 +219,7 @@ class Net(nn.Module):
 
         x_hat = self.D(z)  # decode masked and quantized z
 
-        return x_hat, log_pk, k, a, mu, z, quantization_error
+        return x_hat, log_pk, k, a, mu, z0, z, quantization_error
 
     '''
         reconstruction loss, MS-SSIM much better than MSE
@@ -261,6 +263,7 @@ class Net(nn.Module):
 
         # is the overall error above or below the minimum accuracy?
         cond = accuracy.le(self.min_accuracy)
+        #cond = (torch.mean(accuracy)).le(self.min_accuracy)
         avg_cond = torch.mean(cond.float())
         cond = torch.unsqueeze(torch.unsqueeze(cond, -1), -1).repeat(1, R.shape[1], R.shape[2])
 
@@ -279,7 +282,7 @@ class Net(nn.Module):
 
     def get_accuracy(self, x):
 
-        x_hat, _, k, a, mu, z_hat, _ = self.forward(x)
+        x_hat, _, k, a, mu, z0, z_hat, _ = self.forward(x)
 
         mse = torch.mean(torch.pow(x - x_hat, 2.), (1, 2, 3))
         mse_accuracy = 100. * (1. - mse)
@@ -292,6 +295,6 @@ class Net(nn.Module):
 
         accuracy = msssim
 
-        return accuracy, k, x_hat, z_hat, mu, a
+        return accuracy, k, x_hat, z0, z_hat, mu, a
 
 
