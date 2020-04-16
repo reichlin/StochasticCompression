@@ -167,11 +167,6 @@ def print_RD_curve(model, test_loader, idx_v, writer, device):
 
 def main():
 
-    print(sys.argv[0])
-    print(sys.argv[1])
-    print(sys.argv[2])
-    print(sys.argv[3])
-
     torch.manual_seed(1234)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -189,7 +184,7 @@ def main():
     lr_d = 0.0003  # learning rate for the main optimizer
     # one idea was to divide the to losses into two different optimization steps
     lr_k = 0.0003
-    second_optimizer = True
+    second_optimizer = False
 
     gamma = float(sys.argv[2]) #0.7  # learning rate decay # TODO: we can try different values
     lr_step_size = 1  # decay every epoch
@@ -230,7 +225,7 @@ def main():
     ''' TENSORBOARD WRITER '''
 
     #/Midgard/home/areichlin/compression
-    log_dir = './debug_log/two_opt_adam_z_detach_gamma_'+str(gamma)+'_depth_'+str(model_depth)
+    log_dir = './debug_log/one opt_z_detach_gamma_'+str(gamma)+'_depth_'+str(model_depth)
     writer = SummaryWriter(log_dir=log_dir)
 
     ''' OPTIMIZER, SCHEDULER DEFINITION '''
