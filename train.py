@@ -269,7 +269,7 @@ def main():
     ''' TENSORBOARD WRITER '''
 
     #/Midgard/home/areichlin/compression
-    log_dir = './policy_log/tanh_adv_'+str(advantage)+'_ksize_'+str(k_sampling_window)+'_eps_'+str(exploration_epsilon)+'_clip_'+str(clip_gradient)
+    log_dir = './policy_log/adv_'+str(advantage)+'_ksize_'+str(k_sampling_window)+'_eps_'+str(exploration_epsilon)+'_clip_'+str(clip_gradient)
     writer = SummaryWriter(log_dir=log_dir)
 
     ''' OPTIMIZER, SCHEDULER DEFINITION '''
