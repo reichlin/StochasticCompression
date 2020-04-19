@@ -13,6 +13,10 @@ for adv in 0 1; do
                  train.sbatch
           sleep 1
 
+      done
+
+    done
+
   done
 
 done
