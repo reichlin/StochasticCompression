@@ -73,7 +73,7 @@ class BodyModel(nn.Module):
 
 class Net(nn.Module):
 
-    def __init__(self, min_accuracy, colors, depth, model_size, n, L, device):
+    def __init__(self, min_accuracy, colors, depth, model_size, n, L, advantage, k_sampling_window, exploration_epsilon):
         super(Net, self).__init__()
 
         # constants for the architecture of the model
@@ -82,7 +82,9 @@ class Net(nn.Module):
         self.depth = depth
         self.colors = colors
 
-        self.device = device
+        self.advantage = advantage
+        self.k_sampling_window = k_sampling_window
+        self.exploration_epsilon = exploration_epsilon
 
         # constants for the quantization step
         self.L = L
@@ -130,6 +132,18 @@ class Net(nn.Module):
         self.BNa4 = nn.BatchNorm2d(16)
         self.a_conv6 = nn.Conv2d(in_channels=16, out_channels=1, kernel_size=3, stride=1, padding=(1, 1))
 
+        if self.advantage:
+            self.Expected_R = nn.Sequential(
+                nn.Conv2d(in_channels=(self.n + 1), out_channels=int(model_size / 2), kernel_size=3, stride=1, padding=(1, 1)),
+                nn.BatchNorm2d(int(model_size / 2)),
+                nn.ReLU(),
+                nn.Conv2d(in_channels=int(model_size / 2), out_channels=int(model_size / 2), kernel_size=3, stride=1, padding=(1, 1)),
+                nn.BatchNorm2d(int(model_size / 2)),
+                nn.ReLU(),
+                nn.Conv2d(in_channels=int(model_size / 2), out_channels=1, kernel_size=3, stride=1, padding=(1, 1)),
+                nn.Tanh())
+
+
         # MS-SSIM is used instead of Mean Squared Error for the reconstruction of the original image
         self.msssim = MS_SSIM(data_range=1.0, size_average=False, channel=3, nonnegative_ssim=True)
         self.msssim_test = MS_SSIM(data_range=255, size_average=False, channel=3, nonnegative_ssim=True)
@@ -137,6 +151,8 @@ class Net(nn.Module):
     def E(self, x):
 
         z = self.encoder(x)
+
+        z_tot = z
 
         z0 = z[:, 0:1, :, :]  # [B, H, W], this is a way for the model to understand how useful each part of z is for the reconstruction
         z = z[:, 1:, :, :]  # [B, n, H, W], this is the actual latent representation
@@ -151,7 +167,7 @@ class Net(nn.Module):
 
         mu = torch.sigmoid(a)  # [B, H, W] each value between [0, 1], policy of the agent
 
-        return z0, z, mu, a
+        return z_tot, z0, z, mu, a
 
     def D(self, z):
 
@@ -170,11 +186,15 @@ class Net(nn.Module):
         probs = self.probs.view(-1, 1, 1).repeat(mu.shape[0], mu.shape[1], mu.shape[2])
         sampling_distribution = Bernoulli(probs)
         k = sampling_distribution.sample()*2 - 1  # [B, H, W] # {-1, 1}
+        k = k * torch.ceil(torch.cuda.FloatTensor(k.shape).uniform_() * self.k_sampling_window)
 
         ''' this k is either one bit more or one bit less than mu. The idea is to have z a little bit more compressed 
         or less compressed than the current random variable level to see how performances change'''
         n = float(self.n)
         k = ((torch.round(mu * n) + k) / n).detach()
+
+        cond = (torch.cuda.FloatTensor(k.shape).uniform_()).ge(self.exploration_epsilon)
+        k = cond * k + ~cond * (torch.round(torch.cuda.FloatTensor(k.shape).uniform_() * n) / n)
 
         ''' kind of log probability if the random variable was distributed as a Gaussian'''
         log_pk = - torch.pow((k - mu), 2)
@@ -207,11 +227,15 @@ class Net(nn.Module):
 
         return zm
 
-    def forward(self, x):
+    def forward(self, x, training=True):
 
-        z0, z, mu, a = self.E(x)  # encoder
+        z_tot, z0, z, mu, a = self.E(x)  # encoder
 
-        k, log_pk = self.sample_k(mu)  # sample k from mu
+        if training:
+            k, log_pk = self.sample_k(mu)  # sample k from mu
+        else:
+            k = mu
+            log_pk = k * 0.0
 
         z, quantization_error = self.quantize(z)  # quantize z
 
@@ -219,7 +243,7 @@ class Net(nn.Module):
 
         x_hat = self.D(z)  # decode masked and quantized z
 
-        return x_hat, log_pk, k, a, mu, z0, z, quantization_error
+        return x_hat, log_pk, k, a, mu, z_tot, z0, z, quantization_error
 
     '''
         reconstruction loss, MS-SSIM much better than MSE
@@ -255,7 +279,7 @@ class Net(nn.Module):
     '''
         Reinforcement learning loss to learn the optimal mu for each image
     '''
-    def get_loss_k(self, img_err, accuracy, k, log_pk, a, L2_a):
+    def get_loss_k(self, img_err, accuracy, k, z_tot, log_pk, a, L2_a):
 
         kernel = self.kernel
         R = F.conv2d(img_err, kernel, bias=None, stride=8, padding=0, dilation=1, groups=1).detach()
@@ -272,17 +296,23 @@ class Net(nn.Module):
         R = (cond * R + ~cond * -k).detach()
         # TODO: we can try a log relationship for the compression reward: -torch.log(1.*self.n*torch.clamp(k, 0.)+1.)
 
-        loss_pk = torch.sum(- R * log_pk, (1, 2))  # policy gradient
-        # TODO: actual reinforcement learning loss can be much more complex, we can make experiments on this
-
         loss_a = L2_a * torch.sum(torch.pow(a, 2), (1, 2))  # regularization on the guy that computes mu, before the sigmoid
-        loss = torch.mean(loss_pk + loss_a)
 
-        return loss, avg_cond, R
+        if self.training and self.advantage:
+            E_r = torch.squeeze(self.Expected_R(z_tot.detach()))
+            loss_pk = torch.sum(- (R - E_r) * log_pk, (1, 2))
+            loss = torch.mean(loss_pk + loss_a) + torch.mean( torch.pow( (E_r - R), 2) )
+            adv_err = torch.mean( torch.pow( (E_r - R), 2) )
+        else:
+            loss_pk = torch.sum(- R * log_pk, (1, 2))
+            loss = torch.mean(loss_pk + loss_a)
+            adv_err = loss * 0.0
+
+        return loss, avg_cond, R, adv_err
 
     def get_accuracy(self, x):
 
-        x_hat, _, k, a, mu, z0, z_hat, _ = self.forward(x)
+        x_hat, _, k, a, mu, _, z0, z_hat, _ = self.forward(x, False)
 
         mse = torch.mean(torch.pow(x - x_hat, 2.), (1, 2, 3))
         mse_accuracy = 100. * (1. - mse)

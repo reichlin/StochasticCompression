@@ -9,7 +9,7 @@ mpl.use('Agg')
 import matplotlib.pyplot as plt
 
 
-def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_optimizer, L2_a, beta, idx_t, writer, device):
+def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_optimizer, L2_a, beta, clip_gradient, idx_t, writer, device, max_grad_ever):
 
     for (images, _) in tqdm(train_loader):
 
@@ -17,9 +17,9 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
 
         gpu_imgs = images.to(device).detach()
 
-        x_hat, log_pk, k, a, mu, z0, z_hat, quantization_error = model(gpu_imgs)  # forward pass
+        x_hat, log_pk, k, a, mu, z_tot, z0, z_hat, quantization_error = model(gpu_imgs)  # forward pass
         loss_d, accuracy, accuracy_mean, img_err = model.get_loss_d(gpu_imgs, x_hat)  # compute reconstruction loss
-        loss_k, avg_cond, R = model.get_loss_k(img_err, accuracy, k, log_pk, a, L2_a)  # compute reinforcement learning loss
+        loss_k, avg_cond, R, adv_err = model.get_loss_k(img_err, accuracy, k, z_tot, log_pk, a, L2_a)  # compute reinforcement learning loss
 
         ''' bunch of constants for the tensorboard '''
         z_size = torch.sum(k.detach() * model.n, (1, 2)).cpu()
@@ -34,6 +34,7 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
         a = torch.mean(a).item()
         c_span = torch.abs(torch.max(model.c.detach().cpu()) - torch.min(model.c.detach().cpu())).item()
         k_values = torch.flatten(k).detach().cpu()
+        adv_err = adv_err.item()
 
         # a_prima = model.a_prima.detach().cpu().numpy()
         # a_dopo = model.a_dopo.detach().cpu().numpy()
@@ -46,6 +47,8 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
         if second_optimizer:
             optimizer_k.zero_grad()
             # model.dummy_a.retain_grad()
+            if clip_gradient:
+                torch.nn.utils.clip_grad_norm(model.parameters(), 10.)
             loss_k.backward(retain_graph=True)
             # grad_a = torch.flatten(model.dummy_a.grad)
             optimizer_k.step()
@@ -57,8 +60,19 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
             loss = loss_d + beta * loss_k
 
             optimizer_d.zero_grad()
+            if clip_gradient:
+                torch.nn.utils.clip_grad_norm(model.parameters(), 10.)
             loss.backward(retain_graph=False)
+            max_grad = 0
+            for param in model.parameters():
+                if param.grad is not None:
+                    if torch.max(torch.abs(param.grad)) > max_grad:
+                        max_grad = torch.max(torch.abs(param.grad)).item()
             optimizer_d.step()
+
+        if max_grad > max_grad_ever:
+            max_grad_ever = max_grad
+
 
         ''' compute the bit per pixels of the images '''
         bpp_mean = bpp(k.shape[1], k.shape[2], model.n, z_size_mean, images.shape[-1]*images.shape[-2], np.log2(model.L))
@@ -74,7 +88,13 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
         writer.add_scalar('cond_average', avg_cond, idx_t)
         writer.add_scalar('R_value_average', R, idx_t)
         writer.add_scalar('mu_value_average', a, idx_t)
-        writer.add_histogram('k', k_values, idx_t)
+        writer.add_scalar('adv_err', adv_err, idx_t)
+
+        writer.add_scalar('max_grad', max_grad, idx_t)
+        writer.add_scalar('max_grad_ever', max_grad_ever, idx_t)
+
+        if idx_t % 100 == 0 and idx_t != 0:
+            writer.add_histogram('k', k_values, idx_t)
         # writer.add_histogram('grad_a', grad_a, idx_t)
         #
         # writer.add_scalar('ratio_a_prima_neg', a_prima_neg, idx_t)
@@ -100,7 +120,7 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
 
         idx_t += 1
 
-    return idx_t
+    return idx_t, max_grad_ever
 
 
 def evaluate(model, test_loader, idx, writer, device):
@@ -108,19 +128,31 @@ def evaluate(model, test_loader, idx, writer, device):
     model.eval()
     with torch.no_grad():
 
-        distortion = 0
-        compression = 0
+        distortion = []
+        compression = []
 
         for images, _ in test_loader:
 
             accuracy, k, x_hat, _, z_hat, _, _ = model.get_accuracy(images.to(device))
             z_size = torch.sum(k.detach() * model.n, (1, 2)).cpu()
-            compression += bpp(k.shape[1], k.shape[2], model.n, torch.mean(z_size).item(), 512 * 768, np.log2(model.L))
+            compression.append(bpp(k.shape[1], k.shape[2], model.n, torch.mean(z_size).item(), 512 * 768, np.log2(model.L)))
 
-            distortion += torch.mean(accuracy).cpu().clone().numpy()
+            distortion.append(torch.mean(accuracy).cpu().clone().numpy())
 
-        writer.add_scalar('test_mean_accuracy', distortion, idx)
-        writer.add_scalar('test_mean_compression', compression, idx)
+        d = np.average(distortion)
+        c = np.average(compression)
+
+        x = np.linspace(0.05, 4., 1000)
+        min_dist = np.square(x[0] - c)+np.square((1. - 1. / (108. * x[0])) - (d/100.))
+        for i in range(len(x)):
+            dist = np.square(x[i] - c) + np.square((1. - 1. / (108. * x[i])) - (d/100.))
+            if dist < min_dist:
+                min_dist = dist
+        min_dist = np.sqrt(min_dist)
+
+        writer.add_scalar('test_mean_accuracy', d, idx)
+        writer.add_scalar('test_mean_compression', c, idx)
+        writer.add_scalar('test_min_distance', min_dist, idx)
 
 '''
     this function tests the model on KODAK and plots a scatter plot with accuracy and compression for each KODAK image
@@ -167,6 +199,14 @@ def print_RD_curve(model, test_loader, idx_v, writer, device):
 
 def main():
 
+    '''
+    sys.argv[1] = node name
+    sys.argv[2] = advantage
+    sys.argv[3] = k sampling window size
+    sys.argv[4] = epsilon greedy or greedy
+    sys.argv[5] = gradient clipping
+    '''
+
     torch.manual_seed(1234)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -181,18 +221,22 @@ def main():
 
     print("training on " + sys.argv[1] + " on device: " + str(device))
 
-    lr_d = 0.0003  # learning rate for the main optimizer
-    # one idea was to divide the to losses into two different optimization steps
+    lr_d = 0.0003
     lr_k = 0.0003
     second_optimizer = False
 
-    gamma = float(sys.argv[2]) #0.7  # learning rate decay # TODO: we can try different values
+    advantage = bool(int(sys.argv[2]))
+    k_sampling_window = int(sys.argv[3])
+    exploration_epsilon = float(sys.argv[4])
+    clip_gradient = bool(int(sys.argv[5]))
+
+    gamma = 1.0
     lr_step_size = 1  # decay every epoch
     EPOCHS = 10  # TODO: maybe more?
     Batch_size = 32
     min_accuracy = 97.0  # min error before switching to compression optimization
     colors = 3
-    model_depth = int(sys.argv[3])  # TODO: either 3 or 5
+    model_depth = 3  # TODO: either 3 or 5
     model_size = 64  # TODO: either 64 or 128
     n = 64
     HW = 168
@@ -203,7 +247,7 @@ def main():
 
     ''' MODEL DEFINITION '''
 
-    model = network.Net(min_accuracy, colors, model_depth, model_size, n, L, device).to(device)
+    model = network.Net(min_accuracy, colors, model_depth, model_size, n, L, advantage, k_sampling_window, exploration_epsilon).to(device)
 
     ''' DATASET LOADER '''
     trans_train = transforms.Compose([transforms.RandomHorizontalFlip(),
@@ -225,7 +269,7 @@ def main():
     ''' TENSORBOARD WRITER '''
 
     #/Midgard/home/areichlin/compression
-    log_dir = './debug_log/one opt_z_detach_gamma_'+str(gamma)+'_depth_'+str(model_depth)
+    log_dir = './policy_log/tanh_adv_'+str(advantage)+'_ksize_'+str(k_sampling_window)+'_eps_'+str(exploration_epsilon)+'_clip_'+str(clip_gradient)
     writer = SummaryWriter(log_dir=log_dir)
 
     ''' OPTIMIZER, SCHEDULER DEFINITION '''
@@ -240,8 +284,10 @@ def main():
 
     ''' TRAINING LOOP '''
 
+    max_grad_ever = 0
+
     for epoch in range(1, EPOCHS + 1):
-        idx_t = train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_optimizer, L2_a, beta, idx_t, writer, device)
+        idx_t, max_grad_ever = train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_optimizer, L2_a, beta, clip_gradient, idx_t, writer, device, max_grad_ever)
         scheduler_d.step()
         idx_v = print_RD_curve(model, test_loader, idx_v, writer, device)
 
