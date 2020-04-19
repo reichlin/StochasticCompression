@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 
 def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_optimizer, L2_a, beta, clip_gradient, idx_t, writer, device, max_grad_ever):
 
-    for (images, _) in tqdm(train_loader):
+    for (images, _) in train_loader:#tqdm(train_loader):
 
         model.train()
 
