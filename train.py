@@ -232,7 +232,7 @@ def main():
 
     gamma = 1.0
     lr_step_size = 1  # decay every epoch
-    EPOCHS = 10  # TODO: maybe more?
+    EPOCHS = 5  # TODO: maybe more?
     Batch_size = 32
     min_accuracy = 97.0  # min error before switching to compression optimization
     colors = 3
