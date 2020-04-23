@@ -1,23 +1,21 @@
 
 #! /bin/bash
 
-for adv in 0 1; do
+for decay in 0.8 0.5 0.4; do
+  sbatch --export=SAMPL=0,EPSDECAY=$decay search_stable_policy.sbatch
+  sleep 1
+done
 
-  for ksize in 1 3; do
+sbatch --export=SAMPL=1,EPSDECAY=0.0 search_stable_policy.sbatch
+sleep 1
 
-    for eps in 0.0 0.1; do
+for decay in 0.9 0.8 0.7; do
+  sbatch --export=SAMPL=2,EPSDECAY=$decay search_stable_policy.sbatch
+  sleep 1
+done
 
-      for clip in 0 1; do
-
-          sbatch --export=ADV=$adv,KSIZE=$ksize,EPS=$eps,CLIP=$clip \
-                 search_stable_policy.sbatch
-          sleep 1
-
-      done
-
-    done
-
-  done
-
+for decay in 0.9 0.5 0.1; do
+  sbatch --export=SAMPL=3,EPSDECAY=$decay search_stable_policy.sbatch
+  sleep 1
 done
 
