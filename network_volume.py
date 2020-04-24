@@ -391,13 +391,14 @@ class Net(nn.Module):
             loss = torch.mean(loss_pk + loss_a) + torch.mean( torch.pow( (E_r - R), 2) )
             adv_err = torch.mean( torch.pow( (E_r - R), 2) )
         else:
-            loss_pk = torch.sum(- R * log_pk, (1, 2))
-            if self.sampling_policy == 2:
-                loss = torch.mean(loss_pk)
-            elif self.sampling_policy == 3:
-                loss = torch.mean(loss_pk - self.entropy_bonus * entropy)
+            if self.sampling_policy == 3:
+                loss = torch.mean(torch.sum(- R * log_pk - self.entropy_bonus * entropy, (1, 2)))
             else:
-                loss = torch.mean(loss_pk + loss_a)
+                loss_pk = torch.sum(- R * log_pk, (1, 2))
+                if self.sampling_policy == 2:
+                    loss = torch.mean(loss_pk)
+                else:
+                    loss = torch.mean(loss_pk + loss_a)
             adv_err = loss * 0.0
 
         return loss, avg_cond, R, adv_err

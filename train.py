@@ -268,7 +268,7 @@ def main():
     ''' TENSORBOARD WRITER '''
 
     #/Midgard/home/areichlin/compression
-    log_dir = './policy_log/sampling_policy_'+str(sampling_policy)+'_epsdecay_'+str(exploration_epsilon_decay)+'_beta_'+str(beta)
+    log_dir = './policy_log/sampling_policy_'+str(sampling_policy)+'_epsdecay_'+str(exploration_epsilon_decay)
     writer = SummaryWriter(log_dir=log_dir)
 
     ''' OPTIMIZER, SCHEDULER DEFINITION '''

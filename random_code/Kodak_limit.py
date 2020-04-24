@@ -340,8 +340,8 @@ def main():
 
     lr_d = 0.0003
 
-    exploration_epsilon = 0.1
-    exploration_epsilon_decay = 0.5
+    exploration_epsilon = 0.5
+    exploration_epsilon_decay = 0.05
 
     min_accuracy = 97.0
 
@@ -367,7 +367,7 @@ def main():
     ''' TENSORBOARD WRITER '''
 
     #/Midgard/home/areichlin/compression
-    log_dir = '/Midgard/home/areichlin/compression/log_limit/full_kodak_categorical_decay_'+str(exploration_epsilon_decay)+'beta_'+str(beta)
+    log_dir = '/Midgard/home/areichlin/compression/log_limit/full_kodak_categorical_decay_'+str(exploration_epsilon_decay)+'_eps0_'+str(exploration_epsilon)
     writer = SummaryWriter(log_dir=log_dir)
 
     ''' OPTIMIZER, SCHEDULER DEFINITION '''
@@ -381,7 +381,7 @@ def main():
     for epoch in range(1, EPOCHS + 1):
         idx_t = train(model, train_loader, test_loader, optimizer_d, L2_a, beta, idx_t, writer, device)
         if epoch % 1000 == 0 and epoch != 0:
-            model.exploration_epsilon *= exploration_epsilon_decay
+            model.exploration_epsilon -= exploration_epsilon_decay
 
     writer.close()
 
