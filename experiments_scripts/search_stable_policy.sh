@@ -1,16 +1,16 @@
 
 #! /bin/bash
 
-for decay in 0.8 0.5 0.4; do
-  sbatch --export=SAMPL=0,EPSDECAY=$decay search_stable_policy.sbatch
-  sleep 1
-done
+rm -r /Midgard/home/pshi/alfredo/experiments_scripts/slurm*
+rm -r /Midgard/home/pshi/alfredo/experiments_scripts/policy_log/sampling_policy_1*
+rm -r /Midgard/home/pshi/alfredo/experiments_scripts/policy_log/sampling_policy_3*
+rm -r /Midgard/home/pshi/alfredo/experiments_scripts/policy_log/sampling_policy_0_epsdecay_0.5
+rm -r /Midgard/home/pshi/alfredo/experiments_scripts/policy_log/sampling_policy_0_epsdecay_0.8
 
-sbatch --export=SAMPL=1,EPSDECAY=0.0 search_stable_policy.sbatch
-sleep 1
-
-for decay in 0.9 0.5 0.1; do
-  sbatch --export=SAMPL=3,EPSDECAY=$decay search_stable_policy.sbatch
-  sleep 1
+for eps in 0.5 0.2 0.05 0.01; do
+  for decay in 0.25 0.4 0.64; do
+    sbatch --export=EPS=$eps,EPSDECAY=$decay search_stable_policy.sbatch
+    sleep 1
+  done
 done
 

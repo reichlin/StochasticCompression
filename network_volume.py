@@ -75,7 +75,7 @@ class BodyModel(nn.Module):
 
 class Net(nn.Module):
 
-    def __init__(self, min_accuracy, colors, depth, model_size, n, L, advantage, k_sampling_window, exploration_epsilon, sampling_policy, sigma, entropy_bonus):
+    def __init__(self, min_accuracy, colors, depth, model_size, n, L, advantage, k_sampling_window, exploration_epsilon, sampling_policy, sigma, a_size, a_depth, a_join, a_detach, a_act):
         super(Net, self).__init__()
 
         # constants for the architecture of the model
@@ -86,12 +86,17 @@ class Net(nn.Module):
 
         self.advantage = advantage
         self.k_sampling_window = k_sampling_window
-        self.exploration_epsilon = exploration_epsilon #torch.nn.Parameter(exploration_epsilon, requires_grad=True)
+        self.exploration_epsilon = exploration_epsilon
 
         self.sampling_policy = sampling_policy
 
         self.sigma = torch.nn.Parameter(torch.tensor(sigma), requires_grad=False)
-        self.entropy_bonus = entropy_bonus
+
+        self.a_size = a_size
+        self.a_depth = a_depth
+        self.a_join = a_join
+        self.a_detach = a_detach
+        self.a_act = a_act
 
         # constants for the quantization step
         self.L = L
@@ -126,42 +131,54 @@ class Net(nn.Module):
             nn.ReLU(),
             nn.ConvTranspose2d(in_channels=int(model_size / 2), out_channels=colors, kernel_size=6, stride=2, padding=(2, 2)))
 
-        if self.sampling_policy == 0 or self.sampling_policy == 1:
-            self.a_conv1 = nn.Conv2d(in_channels=1, out_channels=32, kernel_size=3, stride=1, padding=(1, 1))
-            self.BNa1 = nn.BatchNorm2d(32)
-            self.a_conv2 = nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3, stride=1, padding=(1, 1))
-            self.BNa2 = nn.BatchNorm2d(32)
-            self.a_conv3 = nn.Conv2d(in_channels=32, out_channels=self.n, kernel_size=3, stride=1, padding=(1, 1))
-            self.a_conv4 = nn.Conv2d(in_channels=(2*self.n), out_channels=32, kernel_size=3, stride=1, padding=(1, 1))
-            self.BNa3 = nn.BatchNorm2d(32)
-            self.a_conv5 = nn.Conv2d(in_channels=32, out_channels=16, kernel_size=3, stride=1, padding=(1, 1))
-            self.BNa4 = nn.BatchNorm2d(16)
-            self.a_conv6 = nn.Conv2d(in_channels=16, out_channels=1, kernel_size=3, stride=1, padding=(1, 1))
+        if self.a_act == 0:
+            a_act = nn.ReLU()
+        else:
+            a_act = nn.LeakyReLU()
 
-        elif self.sampling_policy == 2:
-            self.a_conv1 = nn.Conv2d(in_channels=1, out_channels=32, kernel_size=3, stride=1, padding=(1, 1))
-            self.BNa1 = nn.BatchNorm2d(32)
-            self.a_conv2 = nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3, stride=1, padding=(1, 1))
-            self.BNa2 = nn.BatchNorm2d(32)
-            self.a_conv3 = nn.Conv2d(in_channels=32, out_channels=self.n, kernel_size=3, stride=1, padding=(1, 1))
-            self.a_conv4 = nn.Conv2d(in_channels=(2 * self.n), out_channels=32, kernel_size=3, stride=1, padding=(1, 1))
-            self.BNa3 = nn.BatchNorm2d(32)
-            self.a_conv5 = nn.Conv2d(in_channels=32, out_channels=16, kernel_size=3, stride=1, padding=(1, 1))
-            self.BNa4 = nn.BatchNorm2d(16)
-            self.a_conv6 = nn.Conv2d(in_channels=16, out_channels=self.n, kernel_size=3, stride=1, padding=(1, 1))
+        if self.a_depth == 6:
+            self.a_1 = nn.Sequential(
+                nn.Conv2d(in_channels=1, out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
+                nn.BatchNorm2d(self.a_size),
+                a_act,
+                nn.Conv2d(in_channels=self.a_size, out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
+                nn.BatchNorm2d(self.a_size),
+                a_act,
+                nn.Conv2d(in_channels=self.a_size, out_channels=self.n, kernel_size=3, stride=1, padding=(1, 1)))
 
-        elif self.sampling_policy == 3:
-            self.a_conv1 = nn.Conv2d(in_channels=1, out_channels=32, kernel_size=3, stride=1, padding=(1, 1))
-            self.BNa1 = nn.BatchNorm2d(32)
-            self.a_conv2 = nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3, stride=1, padding=(1, 1))
-            self.BNa2 = nn.BatchNorm2d(32)
-            self.a_conv3 = nn.Conv2d(in_channels=32, out_channels=self.n, kernel_size=3, stride=1, padding=(1, 1))
-            self.a_conv4 = nn.Conv2d(in_channels=(2 * self.n), out_channels=32, kernel_size=3, stride=1, padding=(1, 1))
-            self.BNa3 = nn.BatchNorm2d(32)
-            self.a_conv5 = nn.Conv2d(in_channels=32, out_channels=16, kernel_size=3, stride=1, padding=(1, 1))
-            self.BNa4 = nn.BatchNorm2d(16)
-            self.a_conv6 = nn.Conv2d(in_channels=16, out_channels=1, kernel_size=3, stride=1, padding=(1, 1))
-            self.a_conv7 = nn.Conv2d(in_channels=16, out_channels=1, kernel_size=3, stride=1, padding=(1, 1))
+            self.a_2 = nn.Sequential(
+                nn.Conv2d(in_channels=(2 * self.n), out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
+                nn.BatchNorm2d(self.a_size),
+                a_act,
+                nn.Conv2d(in_channels=self.a_size, out_channels=int(self.a_size/2.), kernel_size=3, stride=1, padding=(1, 1)),
+                nn.BatchNorm2d(int(self.a_size/2.)),
+                a_act,
+                nn.Conv2d(in_channels=int(self.a_size/2.), out_channels=1, kernel_size=3, stride=1, padding=(1, 1)))
+
+        elif self.a_depth == 8:
+            self.a_1 = nn.Sequential(
+                nn.Conv2d(in_channels=1, out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
+                nn.BatchNorm2d(self.a_size),
+                a_act,
+                nn.Conv2d(in_channels=self.a_size, out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
+                nn.BatchNorm2d(self.a_size),
+                a_act,
+                nn.Conv2d(in_channels=self.a_size, out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
+                nn.BatchNorm2d(self.a_size),
+                a_act,
+                nn.Conv2d(in_channels=self.a_size, out_channels=self.n, kernel_size=3, stride=1, padding=(1, 1)))
+
+            self.a_2 = nn.Sequential(
+                nn.Conv2d(in_channels=(2 * self.n), out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
+                nn.BatchNorm2d(self.a_size),
+                a_act,
+                nn.Conv2d(in_channels=self.a_size, out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
+                nn.BatchNorm2d(self.a_size),
+                a_act,
+                nn.Conv2d(in_channels=self.a_size, out_channels=int(self.a_size / 2.), kernel_size=3, stride=1, padding=(1, 1)),
+                nn.BatchNorm2d(int(self.a_size / 2.)),
+                a_act,
+                nn.Conv2d(in_channels=int(self.a_size / 2.), out_channels=1, kernel_size=3, stride=1, padding=(1, 1)))
 
 
         if self.advantage:
@@ -189,33 +206,21 @@ class Net(nn.Module):
         z0 = z[:, 0:1, :, :]  # [B, H, W], this is a way for the model to understand how useful each part of z is for the reconstruction
         z = z[:, 1:, :, :]  # [B, n, H, W], this is the actual latent representation
 
-        a = F.relu(self.BNa1(self.a_conv1(z0)))
-        a = F.relu(self.BNa2(self.a_conv2(a)))
-        a = self.a_conv3(a)
-        #a = a + z.detach()
-        a = torch.cat((a, z.detach()), 1)
-        a = F.relu(self.BNa3(self.a_conv4(a)))
-        a = F.relu(self.BNa4(self.a_conv5(a)))
+        a = self.a_1(z0)
+        if self.a_detach:
+            z_in = z.detach()
+        else:
+            z_in = z
+        if self.a_join == 0:
+            a = a + z_in
+        else:
+            a = torch.cat((a, z_in), 1)
+        a = self.a_2(a)
 
-        if self.sampling_policy == 0 or self.sampling_policy == 1:
+        a = torch.squeeze(a)
+        mu = torch.sigmoid(a)  # [B, H, W] each value between [0, 1], policy of the agent
 
-            a = torch.squeeze(self.a_conv6(a))
-            mu = torch.sigmoid(a)  # [B, H, W] each value between [0, 1], policy of the agent
-            sigma = None
-
-        elif self.sampling_policy == 2:
-
-            a = self.a_conv6(a)
-            mu = F.softmax(a, dim=1)
-            sigma = None
-
-        elif self.sampling_policy == 3:
-
-            sigma = 0.205 * torch.sigmoid(torch.squeeze(self.a_conv7(a))) - 0.005
-            a = torch.squeeze(self.a_conv6(a))
-            mu = torch.sigmoid(a)
-
-        return z_tot, z0, z, mu, a, sigma
+        return z_tot, z0, z, mu, a
 
     def D(self, z):
 
@@ -228,7 +233,7 @@ class Net(nn.Module):
     '''
         given each mu, sample an action and compute the probability of the action given the policy
     '''
-    def sample_k(self, mu, sigma):
+    def sample_k(self, mu):
 
         if self.sampling_policy == 0:
             probs = self.probs.view(-1, 1, 1).repeat(mu.shape[0], mu.shape[1], mu.shape[2])
@@ -243,7 +248,6 @@ class Net(nn.Module):
             k = cond * k + ~cond * (torch.round(torch.cuda.FloatTensor(k.shape).uniform_() * n) / n)
 
             log_pk = - torch.pow((k - mu), 2)
-            entropy = None
 
         elif self.sampling_policy == 1:
 
@@ -251,35 +255,34 @@ class Net(nn.Module):
             k = m.sample()
 
             log_pk = m.log_prob(k)
-            entropy = None
 
-        elif self.sampling_policy == 2:
+        # elif self.sampling_policy == 2:
+        #
+        #     mu = torch.transpose(mu, 3, 1)
+        #     m = Categorical(mu.reshape(mu.shape[0] * mu.shape[1] * mu.shape[2], mu.shape[3]))
+        #     k = m.sample()
+        #
+        #     cond = (torch.cuda.FloatTensor(k.shape).uniform_()).ge(self.exploration_epsilon)
+        #     k = cond * k + ~cond * (torch.floor(torch.cuda.FloatTensor(k.shape).uniform_() * float(self.n)))
+        #
+        #
+        #     log_pk = m.log_prob(k)
+        #     k = k.reshape(mu.shape[0], mu.shape[1], mu.shape[2])
+        #     log_pk = log_pk.reshape(mu.shape[0], mu.shape[1], mu.shape[2])
+        #
+        #     k = k.type(torch.cuda.FloatTensor) / float(self.n)
+        #     entropy = None
+        #
+        # elif self.sampling_policy == 3:
+        #
+        #     m = Normal(mu, sigma)
+        #     k = m.sample()
+        #
+        #     entropy = m.entropy()
+        #
+        #     log_pk = m.log_prob(k)
 
-            mu = torch.transpose(mu, 3, 1)
-            m = Categorical(mu.reshape(mu.shape[0] * mu.shape[1] * mu.shape[2], mu.shape[3]))
-            k = m.sample()
-
-            cond = (torch.cuda.FloatTensor(k.shape).uniform_()).ge(self.exploration_epsilon)
-            k = cond * k + ~cond * (torch.floor(torch.cuda.FloatTensor(k.shape).uniform_() * float(self.n)))
-
-
-            log_pk = m.log_prob(k)
-            k = k.reshape(mu.shape[0], mu.shape[1], mu.shape[2])
-            log_pk = log_pk.reshape(mu.shape[0], mu.shape[1], mu.shape[2])
-
-            k = k.type(torch.cuda.FloatTensor) / float(self.n)
-            entropy = None
-
-        elif self.sampling_policy == 3:
-
-            m = Normal(mu, sigma)
-            k = m.sample()
-
-            entropy = m.entropy()
-
-            log_pk = m.log_prob(k)
-
-        return k, log_pk, entropy
+        return k, log_pk
 
     ''' This function takes z and quantize it so that the only possible values in it are the ones in self.c '''
     def quantize(self, z):
@@ -309,20 +312,19 @@ class Net(nn.Module):
 
     def forward(self, x, training=True):
 
-        z_tot, z0, z, mu, a, sigma = self.E(x)  # encoder
+        z_tot, z0, z, mu, a = self.E(x)  # encoder
 
         if training:
-            k, log_pk, entropy = self.sample_k(mu, sigma)  # sample k from mu
+            k, log_pk = self.sample_k(mu)  # sample k from mu
         else:
-            if self.sampling_policy == 2:
-                k = mu.argmax(1)
-                k = k.type(torch.cuda.FloatTensor) / float(self.n)
-                log_pk = k * 0.0
-                entropy = None
-            else:
-                k = mu
-                log_pk = k * 0.0
-                entropy = None
+            # if self.sampling_policy == 2:
+            #     k = mu.argmax(1)
+            #     k = k.type(torch.cuda.FloatTensor) / float(self.n)
+            #     log_pk = k * 0.0
+            #     entropy = None
+            # else:
+            k = mu
+            log_pk = None
 
         z, quantization_error = self.quantize(z)  # quantize z
 
@@ -330,7 +332,7 @@ class Net(nn.Module):
 
         x_hat = self.D(z)  # decode masked and quantized z
 
-        return x_hat, log_pk, entropy, k, a, mu, z_tot, z0, z, quantization_error
+        return x_hat, log_pk, k, a, mu, z_tot, z0, z, quantization_error
 
     '''
         reconstruction loss, MS-SSIM much better than MSE
@@ -366,7 +368,7 @@ class Net(nn.Module):
     '''
         Reinforcement learning loss to learn the optimal mu for each image
     '''
-    def get_loss_k(self, img_err, accuracy, k, z_tot, log_pk, entropy, a, L2_a):
+    def get_loss_k(self, img_err, accuracy, k, z_tot, log_pk, a, L2_a):
 
         kernel = self.kernel
         R = F.conv2d(img_err, kernel, bias=None, stride=8, padding=0, dilation=1, groups=1).detach()
@@ -391,21 +393,18 @@ class Net(nn.Module):
             loss = torch.mean(loss_pk + loss_a) + torch.mean( torch.pow( (E_r - R), 2) )
             adv_err = torch.mean( torch.pow( (E_r - R), 2) )
         else:
-            if self.sampling_policy == 3:
-                loss = torch.mean(torch.sum(- R * log_pk - self.entropy_bonus * entropy, (1, 2)))
-            else:
-                loss_pk = torch.sum(- R * log_pk, (1, 2))
-                if self.sampling_policy == 2:
-                    loss = torch.mean(loss_pk)
-                else:
-                    loss = torch.mean(loss_pk + loss_a)
+            # if self.sampling_policy == 3:
+            #     loss = torch.mean(torch.sum(- R * log_pk - self.entropy_bonus * entropy, (1, 2)))
+            # else:
+            loss_pk = torch.sum(- R * log_pk, (1, 2))
+            loss = torch.mean(loss_pk + loss_a)
             adv_err = loss * 0.0
 
         return loss, avg_cond, R, adv_err
 
     def get_accuracy(self, x):
 
-        x_hat, _, _, k, a, mu, _, z0, z_hat, _ = self.forward(x, False)
+        x_hat, _, k, a, mu, _, z0, z_hat, _ = self.forward(x, False)
 
         mse = torch.mean(torch.pow(x - x_hat, 2.), (1, 2, 3))
         mse_accuracy = 100. * (1. - mse)

@@ -17,9 +17,9 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
 
         gpu_imgs = images.to(device).detach()
 
-        x_hat, log_pk, entropy, k, a, mu, z_tot, z0, z_hat, quantization_error = model(gpu_imgs)  # forward pass
+        x_hat, log_pk, k, a, mu, z_tot, z0, z_hat, quantization_error = model(gpu_imgs)  # forward pass
         loss_d, accuracy, accuracy_mean, img_err = model.get_loss_d(gpu_imgs, x_hat)  # compute reconstruction loss
-        loss_k, avg_cond, R, adv_err = model.get_loss_k(img_err, accuracy, k, z_tot, log_pk, entropy, a, L2_a)  # compute reinforcement learning loss
+        loss_k, avg_cond, R, adv_err = model.get_loss_k(img_err, accuracy, k, z_tot, log_pk, a, L2_a)  # compute reinforcement learning loss
 
         ''' bunch of constants for the tensorboard '''
         z_size = torch.sum(k.detach() * model.n, (1, 2)).cpu()
@@ -29,6 +29,8 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
         accuracy_mean = accuracy_mean.item()
         avg_cond = avg_cond.item()
         R = torch.mean(R).item()
+        mu_img = mu.detach().cpu().clone().numpy()
+        mu_img = mu_img / np.expand_dims(np.expand_dims(np.max(mu_img, (1, 2)), -1), -1)
         a = torch.mean(a).item()
         c_span = torch.abs(torch.max(model.c.detach().cpu()) - torch.min(model.c.detach().cpu())).item()
         k_values = torch.flatten(k).detach().cpu()
@@ -103,11 +105,13 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
 
             imgs_x = images[0:3].detach().clone().numpy()
             imgs_x_hat = x_hat[0:3].detach().cpu().clone().numpy()
+            imgs_mu_img = (np.expand_dims(mu_img, 1))[0:3]
             z_img = z_hat[0:3,0:1].detach().cpu().clone().numpy()
             z_img_sum = np.expand_dims(torch.sum(z_hat, dim=1)[0:3].detach().cpu().clone().numpy(), 1)
             z0_img = z0[0:3].detach().cpu().clone().numpy()
             writer.add_images("x_hat", imgs_x_hat, int(idx_t / 1000))
             writer.add_images("x", imgs_x, int(idx_t / 1000))
+            writer.add_images("mu_img", imgs_mu_img, int(idx_t / 1000))
             writer.add_images("z_1_img", z_img, int(idx_t / 1000))
             writer.add_images("z_sum_img", z_img_sum, int(idx_t / 1000))
             writer.add_images("z0_img", z0_img, int(idx_t / 1000))
@@ -180,8 +184,12 @@ def print_RD_curve(model, test_loader, idx_v, writer, device):
         writer.add_figure("rate_distortion_KODAK", fig, idx_v)
 
         img = x_hat[0].detach().cpu().clone().numpy()
+        mu_img = mu.detach().cpu().clone().numpy()
+        mu_img = mu_img / np.expand_dims(np.expand_dims(np.max(mu_img, (1, 2)), -1), -1)
+        img_mu_img = (np.expand_dims(mu_img, 1))[0]
         z0_img = z0[0:3].detach().cpu().clone().numpy()
         writer.add_image("KODAK", img, idx_v)
+        writer.add_image("KODAK_mu_img", img_mu_img, idx_v)
         writer.add_images("KODAK_z0_img", z0_img, idx_v)
 
         idx_v += 1
@@ -190,12 +198,6 @@ def print_RD_curve(model, test_loader, idx_v, writer, device):
 
 
 def main():
-
-    '''
-    sampling policy = 0:
-    sampling policy = 0:
-    sampling policy = 0:
-    '''
 
     torch.manual_seed(1234)
 
@@ -211,42 +213,70 @@ def main():
 
     print("training on " + sys.argv[1] + " on device: " + str(device))
 
+
+    ''' PARAMETERS '''
+    # AUTOENCODER
+    EPOCHS = 5
+    Batch_size = 32
+    min_accuracy = 97.0
+    colors = 3
+    n = 64
+    HW = 168
+    L = 8
+
+    L2 = 0.0
+    L2_a = 0.0000005
+
     lr_d = 0.0003
+    gamma = 1.0
+    lr_step_size = 1
+
     lr_k = 0.0003
     second_optimizer = False
 
-    advantage = False #bool(int(sys.argv[2]))
-    k_sampling_window = 1 #int(sys.argv[3])
-    exploration_epsilon = 0.1 #float(sys.argv[4])
-    clip_gradient = False #bool(int(sys.argv[5]))
+    model_depth = 3
+    model_size = 64
 
-    sampling_policy = int(sys.argv[2])
+    beta = 0.1
+
+    # POLICY NETWORK
+    a_size = 32
+    a_depth = 6
+    a_join = 1  # 0:sum, 1:concat
+    a_detach = True
+    a_act = 0  # 0:relu, 1:leakyrelu
+
+    # POLICY SEARCH
+
+    advantage = False
+    k_sampling_window = 1
+    clip_gradient = False
+
+    sampling_policy = 0  # 0:default,1:gaussian
+    exploration_epsilon = float(sys.argv[2])
     exploration_epsilon_decay = float(sys.argv[3])
 
     sigma = 0.1
     sigma_decay = 0.8
 
-    entropy_bonus = 0.01
-    entropy_bonus_decay = float(sys.argv[3])
-
-    gamma = 1.0
-    lr_step_size = 1  # decay every epoch
-    EPOCHS = 5  # TODO: maybe more?
-    Batch_size = 32
-    min_accuracy = 97.0  # min error before switching to compression optimization
-    colors = 3
-    model_depth = 3  # TODO: either 3 or 5
-    model_size = 64  # TODO: either 64 or 128
-    n = 64
-    HW = 168
-    L2 = 0.0  # for now no regularization, we can make experiments on this
-    L = 8  # number of symbols used used by the quantization step
-    L2_a = 0.0000005  # regularization on mu  # TODO:performances sensible to this parameter
-    beta = 0.1  # L_tot = L1 + beta * L2  # TODO: performances sensible to this parameter
-
     ''' MODEL DEFINITION '''
 
-    model = network.Net(min_accuracy, colors, model_depth, model_size, n, L, advantage, k_sampling_window, exploration_epsilon, sampling_policy, sigma, entropy_bonus).to(device)
+    model = network.Net(min_accuracy,
+                        colors,
+                        model_depth,
+                        model_size,
+                        n,
+                        L,
+                        advantage,
+                        k_sampling_window,
+                        exploration_epsilon,
+                        sampling_policy,
+                        sigma,
+                        a_size,
+                        a_depth,
+                        a_join,
+                        a_detach,
+                        a_act).to(device)
 
     ''' DATASET LOADER '''
     trans_train = transforms.Compose([transforms.RandomHorizontalFlip(),
@@ -268,7 +298,7 @@ def main():
     ''' TENSORBOARD WRITER '''
 
     #/Midgard/home/areichlin/compression
-    log_dir = './policy_log/sampling_policy_'+str(sampling_policy)+'_epsdecay_'+str(exploration_epsilon_decay)
+    log_dir = './policy_log/eps0_'+str(exploration_epsilon)+'_eps_decay_'+str(exploration_epsilon_decay)+'_beta_'+str(beta)
     writer = SummaryWriter(log_dir=log_dir)
 
     ''' OPTIMIZER, SCHEDULER DEFINITION '''
@@ -285,12 +315,13 @@ def main():
 
     max_grad_ever = 0
 
+    print("start training")
+
     for epoch in range(1, EPOCHS + 1):
         idx_t, max_grad_ever = train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_optimizer, L2_a, beta, clip_gradient, idx_t, writer, device, max_grad_ever)
         scheduler_d.step()
         model.exploration_epsilon *= exploration_epsilon_decay
         model.sigma *= sigma_decay
-        model.entropy_bonus *= entropy_bonus_decay
         idx_v = print_RD_curve(model, test_loader, idx_v, writer, device)
 
     writer.close()
