@@ -216,7 +216,7 @@ def main():
 
     ''' PARAMETERS '''
     # AUTOENCODER
-    EPOCHS = 5
+    EPOCHS = 10
     Batch_size = 32
     min_accuracy = 97.0
     colors = 3
@@ -238,6 +238,8 @@ def main():
     model_size = 64
 
     beta = 0.1
+
+    decoder_type = 0  # 0:deconvolution, 1:upsampling
 
     # POLICY NETWORK
     a_size = 32
@@ -276,7 +278,8 @@ def main():
                         a_depth,
                         a_join,
                         a_detach,
-                        a_act).to(device)
+                        a_act,
+                        decoder_type).to(device)
 
     ''' DATASET LOADER '''
     trans_train = transforms.Compose([transforms.RandomHorizontalFlip(),

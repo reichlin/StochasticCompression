@@ -75,7 +75,7 @@ class BodyModel(nn.Module):
 
 class Net(nn.Module):
 
-    def __init__(self, min_accuracy, colors, depth, model_size, n, L, advantage, k_sampling_window, exploration_epsilon, sampling_policy, sigma, a_size, a_depth, a_join, a_detach, a_act):
+    def __init__(self, min_accuracy, colors, depth, model_size, n, L, advantage, k_sampling_window, exploration_epsilon, sampling_policy, sigma, a_size, a_depth, a_join, a_detach, a_act, decoder_type):
         super(Net, self).__init__()
 
         # constants for the architecture of the model
@@ -121,15 +121,26 @@ class Net(nn.Module):
             nn.ZeroPad2d((1, 2, 1, 2)),
             nn.Conv2d(in_channels=model_size, out_channels=(self.n + 1), kernel_size=5, stride=2, padding=(0, 0)))
 
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(in_channels=self.n, out_channels=model_size, kernel_size=6, stride=2, padding=(2, 2)),
-            nn.BatchNorm2d(model_size),
-            nn.ReLU(),
-            BodyModel(model_size, depth),
-            nn.ConvTranspose2d(in_channels=model_size, out_channels=int(model_size / 2), kernel_size=6, stride=2, padding=(2, 2)),
-            nn.BatchNorm2d(int(model_size / 2)),
-            nn.ReLU(),
-            nn.ConvTranspose2d(in_channels=int(model_size / 2), out_channels=colors, kernel_size=6, stride=2, padding=(2, 2)))
+        if decoder_type == 0:
+            self.decoder = nn.Sequential(
+                nn.ConvTranspose2d(in_channels=self.n, out_channels=model_size, kernel_size=6, stride=2, padding=(2, 2)),
+                nn.BatchNorm2d(model_size),
+                nn.ReLU(),
+                BodyModel(model_size, depth),
+                nn.ConvTranspose2d(in_channels=model_size, out_channels=int(model_size / 2), kernel_size=6, stride=2, padding=(2, 2)),
+                nn.BatchNorm2d(int(model_size / 2)),
+                nn.ReLU(),
+                nn.ConvTranspose2d(in_channels=int(model_size / 2), out_channels=colors, kernel_size=6, stride=2, padding=(2, 2)))
+        else:
+            self.decoder = nn.Sequential(
+                nn.ConvTranspose2d(in_channels=self.n, out_channels=model_size, kernel_size=6, stride=2, padding=(2, 2)),
+                nn.BatchNorm2d(model_size),
+                nn.ReLU(),
+                BodyModel(model_size, depth),
+                nn.ConvTranspose2d(in_channels=model_size, out_channels=int(model_size / 2), kernel_size=6, stride=2, padding=(2, 2)),
+                nn.BatchNorm2d(int(model_size / 2)),
+                nn.ReLU(),
+                nn.ConvTranspose2d(in_channels=int(model_size / 2), out_channels=colors, kernel_size=6, stride=2, padding=(2, 2)))
 
         if self.a_act == 0:
             a_act = nn.ReLU()
