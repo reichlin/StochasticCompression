@@ -237,16 +237,16 @@ def main():
     model_depth = 3
     model_size = 64
 
-    beta = 0.1
+    beta = float(sys.argv[2])
 
-    decoder_type = 0  # 0:deconvolution, 1:upsampling
+    decoder_type = 0  # 0:deconvolution, 1:upsampling_nearest, 2:upsampling_bilinear
 
     # POLICY NETWORK
-    a_size = 32
-    a_depth = 6
-    a_join = 1  # 0:sum, 1:concat
+    a_size = int(sys.argv[3])
+    a_depth = int(sys.argv[4])
+    a_join = int(sys.argv[5])  # 0:sum, 1:concat
     a_detach = True
-    a_act = 0  # 0:relu, 1:leakyrelu
+    a_act = int(sys.argv[6])  # 0:relu, 1:leakyrelu
 
     # POLICY SEARCH
 
@@ -255,8 +255,8 @@ def main():
     clip_gradient = False
 
     sampling_policy = 0  # 0:default,1:gaussian
-    exploration_epsilon = float(sys.argv[2])
-    exploration_epsilon_decay = float(sys.argv[3])
+    exploration_epsilon = 0.1
+    exploration_epsilon_decay = 0.4
 
     sigma = 0.1
     sigma_decay = 0.8
@@ -301,7 +301,7 @@ def main():
     ''' TENSORBOARD WRITER '''
 
     #/Midgard/home/areichlin/compression
-    log_dir = './policy_log/eps0_'+str(exploration_epsilon)+'_eps_decay_'+str(exploration_epsilon_decay)+'_beta_'+str(beta)
+    log_dir = './policy_log/beta_'+str(beta)+'_Asize_'+str(a_size)+'_Adepth_'+str(a_depth)+'_Ajoin_'+str(a_join)+'_Aact'+str(a_act)
     writer = SummaryWriter(log_dir=log_dir)
 
     ''' OPTIMIZER, SCHEDULER DEFINITION '''
