@@ -1,4 +1,5 @@
 import time
+import torch
 import torch.nn as nn
 from torchvision.datasets import ImageNet
 from tqdm import tqdm
@@ -117,6 +118,7 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
             writer.add_images("z0_img", z0_img, int(idx_t / 1000))
 
             evaluate(model, test_loader, int(idx_t / 1000), writer, device)  # test KODAK dataset
+            test_channels_order(model, test_loader, int(idx_t / 1000), writer, device)
 
         idx_t += 1
 
@@ -154,9 +156,27 @@ def evaluate(model, test_loader, idx, writer, device):
         writer.add_scalar('test_mean_compression', c, idx)
         writer.add_scalar('test_min_distance', min_dist, idx)
 
-'''
-    this function tests the model on KODAK and plots a scatter plot with accuracy and compression for each KODAK image
-'''
+
+def test_channels_order(model, test_loader, idx_v, writer, device):
+
+    model.eval()
+    with torch.no_grad():
+
+        for images, _ in test_loader:
+
+            acc_channels, acc_channels_fat_z = model.get_information_content(images.to(device))
+
+            fig = plt.figure()
+            plt.plot(np.linspace(1, model.n, model.n), acc_channels)
+            plt.grid()
+            writer.add_figure("average_information_content", fig, idx_v)
+
+            fig = plt.figure()
+            plt.plot(np.linspace(1, model.n, model.n), acc_channels_fat_z)
+            plt.grid()
+            writer.add_figure("fat_information_content", fig, idx_v)
+
+
 def print_RD_curve(model, test_loader, idx_v, writer, device):
 
     model.eval()
@@ -216,7 +236,7 @@ def main():
 
     ''' PARAMETERS '''
     # AUTOENCODER
-    EPOCHS = 10
+    EPOCHS = 20
     Batch_size = 32
     min_accuracy = 97.0
     colors = 3
@@ -237,16 +257,14 @@ def main():
     model_depth = 3
     model_size = 64
 
-    beta = float(sys.argv[2])
+    beta = 0.1
 
     decoder_type = 0  # 0:deconvolution, 1:upsampling_nearest, 2:upsampling_bilinear
 
     # POLICY NETWORK
-    a_size = int(sys.argv[3])
-    a_depth = int(sys.argv[4])
-    a_join = int(sys.argv[5])  # 0:sum, 1:concat
-    a_detach = True
-    a_act = int(sys.argv[6])  # 0:relu, 1:leakyrelu
+    a_size = 32
+    a_depth = 6
+    a_act = 1  # 0:relu, 1:leakyrelu
 
     # POLICY SEARCH
 
@@ -254,12 +272,12 @@ def main():
     k_sampling_window = 1
     clip_gradient = False
 
-    sampling_policy = 0  # 0:default,1:gaussian
+    sampling_policy = int(sys.argv[2])  # 0:default,1:gaussian,2:asymmetrical,3:partial_asymmetrical
     exploration_epsilon = 0.1
     exploration_epsilon_decay = 0.4
 
-    sigma = 0.1
-    sigma_decay = 0.8
+    sigma = 0.05
+    sigma_decay = 0.9
 
     ''' MODEL DEFINITION '''
 
@@ -276,8 +294,6 @@ def main():
                         sigma,
                         a_size,
                         a_depth,
-                        a_join,
-                        a_detach,
                         a_act,
                         decoder_type).to(device)
 
@@ -301,7 +317,7 @@ def main():
     ''' TENSORBOARD WRITER '''
 
     #/Midgard/home/areichlin/compression
-    log_dir = './policy_log/beta_'+str(beta)+'_Asize_'+str(a_size)+'_Adepth_'+str(a_depth)+'_Ajoin_'+str(a_join)+'_Aact'+str(a_act)
+    log_dir = './policy_log/sampling_policy_'+str(sampling_policy)
     writer = SummaryWriter(log_dir=log_dir)
 
     ''' OPTIMIZER, SCHEDULER DEFINITION '''
@@ -321,7 +337,19 @@ def main():
     print("start training")
 
     for epoch in range(1, EPOCHS + 1):
-        idx_t, max_grad_ever = train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_optimizer, L2_a, beta, clip_gradient, idx_t, writer, device, max_grad_ever)
+        idx_t, max_grad_ever = train(model,
+                                     train_loader,
+                                     test_loader,
+                                     optimizer_d,
+                                     optimizer_k,
+                                     second_optimizer,
+                                     L2_a,
+                                     beta,
+                                     clip_gradient,
+                                     idx_t,
+                                     writer,
+                                     device,
+                                     max_grad_ever)
         scheduler_d.step()
         model.exploration_epsilon *= exploration_epsilon_decay
         model.sigma *= sigma_decay

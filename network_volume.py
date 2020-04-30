@@ -75,7 +75,7 @@ class BodyModel(nn.Module):
 
 class Net(nn.Module):
 
-    def __init__(self, min_accuracy, colors, depth, model_size, n, L, advantage, k_sampling_window, exploration_epsilon, sampling_policy, sigma, a_size, a_depth, a_join, a_detach, a_act, decoder_type):
+    def __init__(self, min_accuracy, colors, depth, model_size, n, L, advantage, k_sampling_window, exploration_epsilon, sampling_policy, sigma, a_size, a_depth, a_act, decoder_type):
         super(Net, self).__init__()
 
         # constants for the architecture of the model
@@ -94,8 +94,6 @@ class Net(nn.Module):
 
         self.a_size = a_size
         self.a_depth = a_depth
-        self.a_join = a_join
-        self.a_detach = a_detach
         self.a_act = a_act
 
         # constants for the quantization step
@@ -226,14 +224,8 @@ class Net(nn.Module):
         z = z[:, 1:, :, :]  # [B, n, H, W], this is the actual latent representation
 
         a = self.a_1(z0)
-        if self.a_detach:
-            z_in = z.detach()
-        else:
-            z_in = z
-        if self.a_join == 0:
-            a = a + z_in
-        else:
-            a = torch.cat((a, z_in), 1)
+        z_in = z.detach()
+        a = torch.cat((a, z_in), 1)
         a = self.a_2(a)
 
         a = torch.squeeze(a)
@@ -274,6 +266,39 @@ class Net(nn.Module):
             k = m.sample()
 
             log_pk = m.log_prob(k)
+
+        elif self.sampling_policy == 2:
+
+            probs = self.probs.view(-1, 1, 1).repeat(mu.shape[0], mu.shape[1], mu.shape[2])
+            sampling_distribution = Bernoulli(probs)
+            k = sampling_distribution.sample() * 2 - 1  # [B, H, W] # {-1, 1}
+            k = k * torch.ceil(torch.cuda.FloatTensor(k.shape).uniform_() * self.k_sampling_window)
+
+            n = float(self.n)
+            k = ((torch.round(mu * n) + k) / n).detach()
+
+            cond = (torch.cuda.FloatTensor(k.shape).uniform_()).ge(self.exploration_epsilon)
+            k = cond * k + ~cond * torch.cuda.FloatTensor(k.shape).uniform_() * mu
+
+            log_pk = - torch.pow((k - mu), 2)
+
+        elif self.sampling_policy == 3:
+
+            probs = self.probs.view(-1, 1, 1).repeat(mu.shape[0], mu.shape[1], mu.shape[2])
+            sampling_distribution = Bernoulli(probs)
+            k = sampling_distribution.sample() * 2 - 1  # [B, H, W] # {-1, 1}
+            k = k * torch.ceil(torch.cuda.FloatTensor(k.shape).uniform_() * self.k_sampling_window)
+
+            n = float(self.n)
+            k = ((torch.round(mu * n) + k) / n).detach()
+
+            cond1 = (torch.cuda.FloatTensor(k.shape).uniform_()).ge(self.exploration_epsilon)
+            cond2 = (torch.cuda.FloatTensor(k.shape).uniform_()).ge(self.exploration_epsilon*0.1)
+            k = cond1 * k + ~cond1 * torch.cuda.FloatTensor(k.shape).uniform_() * mu + ~cond2 * (torch.round(torch.cuda.FloatTensor(k.shape).uniform_() * n) / n)
+
+            log_pk = - torch.pow((k - mu), 2)
+
+
 
         # elif self.sampling_policy == 2:
         #
@@ -437,5 +462,45 @@ class Net(nn.Module):
         accuracy = msssim
 
         return accuracy, k, x_hat, z0, z_hat, mu, a
+
+    def get_information_content(self, x):
+
+        _, _, z, mu, _ = self.E(x)
+
+        idx = torch.argmax(mu)
+        idx_0 = int(idx / (mu.shape[1] * mu.shape[2]))
+        idx_1 = int((idx - idx_0 * mu.shape[1] * mu.shape[2]) / (mu.shape[2]))
+        idx_2 = int(idx - idx_0 * mu.shape[1] * mu.shape[2] - idx_1 * mu.shape[2])
+
+        z, _ = self.quantize(z)
+
+        # what's the average information content of each channel?
+        acc_channels = np.zeros(self.n)
+        acc_channels_fat_z = np.zeros(self.n)
+
+        for i in range(self.n):
+            z_m = z * 1.0
+            z_m[:, i, :, :] *= 0.0
+            x_hat = self.D(z_m)
+            msssim = self.msssim(x, x_hat)
+            msssim_accuracy = 100 * msssim
+            msssim_mean = torch.mean(msssim_accuracy)
+            acc_channels[i] = msssim_mean
+
+        # how is the information content distributed among channels of z-pixels of images with high mu
+
+        z_fat = z[idx_0:(idx_0+1)]
+        x_fat = x[idx_0:(idx_0+1)]
+
+        for i in range(self.n):
+            z_m = z_fat * 1.0
+            z_m[:, i, idx_1, idx_2] *= 0.0
+            x_hat = self.D(z_m)
+            msssim = self.msssim(x_fat, x_hat)
+            msssim_accuracy = 100 * msssim
+            msssim_mean = torch.mean(msssim_accuracy)
+            acc_channels_fat_z[i] = msssim_mean
+
+        return acc_channels, acc_channels_fat_z
 
 
