@@ -276,8 +276,8 @@ def main():
     exploration_epsilon = 0.1
     exploration_epsilon_decay = 0.4
 
-    sigma = 0.05
-    sigma_decay = 0.9
+    sigma = int(sys.argv[3]) #0.05
+    sigma_decay = int(sys.argv[4]) #0.9
 
     ''' MODEL DEFINITION '''
 
@@ -317,7 +317,7 @@ def main():
     ''' TENSORBOARD WRITER '''
 
     #/Midgard/home/areichlin/compression
-    log_dir = './policy_log/sampling_policy_'+str(sampling_policy)
+    log_dir = './policy_log/sampling_policy_'+str(sampling_policy)+'_sigma_'+str(sigma)+'_decay_'+str(sigma_decay)
     writer = SummaryWriter(log_dir=log_dir)
 
     ''' OPTIMIZER, SCHEDULER DEFINITION '''

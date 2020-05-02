@@ -265,7 +265,8 @@ class Net(nn.Module):
             m = Normal(mu, self.sigma.repeat(mu.shape[0], mu.shape[1], mu.shape[2]))
             k = m.sample()
 
-            log_pk = m.log_prob(k)
+            #log_pk = m.log_prob(k)
+            log_pk = - torch.pow((k - mu), 2)
 
         elif self.sampling_policy == 2:
 
