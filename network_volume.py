@@ -5,6 +5,7 @@ import numpy as np
 from pytorch_msssim import MS_SSIM
 from torch.distributions.bernoulli import Bernoulli
 from torch.distributions.normal import Normal
+from torch.distributions.poisson import Poisson
 from torch.distributions.categorical import Categorical
 
 
@@ -75,7 +76,7 @@ class BodyModel(nn.Module):
 
 class Net(nn.Module):
 
-    def __init__(self, min_accuracy, colors, depth, model_size, n, L, advantage, k_sampling_window, exploration_epsilon, sampling_policy, sigma, a_size, a_depth, a_act, decoder_type):
+    def __init__(self, min_accuracy, colors, depth, model_size, n, L, advantage, k_sampling_window, exploration_epsilon, sampling_policy, sigma, a_size, a_depth, a_act, decoder_type, exploration_noise_type):
         super(Net, self).__init__()
 
         # constants for the architecture of the model
@@ -89,6 +90,7 @@ class Net(nn.Module):
         self.exploration_epsilon = exploration_epsilon
 
         self.sampling_policy = sampling_policy
+        self.exploration_noise_type = exploration_noise_type
 
         self.sigma = torch.nn.Parameter(torch.tensor(sigma), requires_grad=False)
 
@@ -298,6 +300,26 @@ class Net(nn.Module):
             k = cond1 * k + ~cond1 * torch.cuda.FloatTensor(k.shape).uniform_() * mu + ~cond2 * (torch.round(torch.cuda.FloatTensor(k.shape).uniform_() * n) / n)
 
             log_pk = - torch.pow((k - mu), 2)
+
+        elif self.sampling_policy == 4:
+
+            n = float(self.n)
+
+            m = Poisson(mu * n)
+            k = torch.clamp(m.sample(), 0., n)
+
+            cond = (torch.cuda.FloatTensor(k.shape).uniform_()).ge(self.exploration_epsilon)
+            if self.exploration_noise_type == 0:
+                noise = (torch.round(torch.cuda.FloatTensor(k.shape).uniform_() * n)) # [0, n]
+            elif self.exploration_noise_type == 1:
+                noise = k / k
+            elif self.exploration_noise_type == 2:
+                noise = (torch.round(torch.cuda.FloatTensor(k.shape).uniform_() * mu)) # [0, n]
+
+            k = cond * k + ~cond * noise
+
+            log_pk = m.log_prob(k)
+            k = (k / n).detach()
 
 
 

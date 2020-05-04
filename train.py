@@ -236,7 +236,7 @@ def main():
 
     ''' PARAMETERS '''
     # AUTOENCODER
-    EPOCHS = 20
+    EPOCHS = 10
     Batch_size = 32
     min_accuracy = 97.0
     colors = 3
@@ -272,12 +272,13 @@ def main():
     k_sampling_window = 1
     clip_gradient = False
 
-    sampling_policy = int(sys.argv[2])  # 0:default,1:gaussian,2:asymmetrical,3:partial_asymmetrical
-    exploration_epsilon = 0.1
-    exploration_epsilon_decay = 0.4
+    sampling_policy = int(sys.argv[2])  # 0:default,1:gaussian,2:asymmetrical,3:partial_asymmetrical,4:poisson
+    exploration_noise_type = int(sys.argv[3])  # 0:uniform,1:only_zero,2:uniform_0_mu
+    exploration_epsilon = int(sys.argv[4]) #0.1 # steady state -> 0.0
+    exploration_epsilon_decay = int(sys.argv[5]) # 0.4
 
-    sigma = int(sys.argv[3]) #0.05
-    sigma_decay = int(sys.argv[4]) #0.9
+    sigma = 0.05 #int(sys.argv[3]) #0.05 steady state -> 0.01
+    sigma_decay = 0.9 #int(sys.argv[4]) #0.9
 
     ''' MODEL DEFINITION '''
 
@@ -295,7 +296,8 @@ def main():
                         a_size,
                         a_depth,
                         a_act,
-                        decoder_type).to(device)
+                        decoder_type,
+                        exploration_noise_type).to(device)
 
     ''' DATASET LOADER '''
     trans_train = transforms.Compose([transforms.RandomHorizontalFlip(),
@@ -317,7 +319,7 @@ def main():
     ''' TENSORBOARD WRITER '''
 
     #/Midgard/home/areichlin/compression
-    log_dir = './policy_log/sampling_policy_'+str(sampling_policy)+'_sigma_'+str(sigma)+'_decay_'+str(sigma_decay)
+    log_dir = '/Midgard/home/areichlin/compression/policy_log/sampling_policy_'+str(sampling_policy)+'_U0_'+str(exploration_epsilon)+'_Ud_'+str(exploration_epsilon_decay)+'_exp_type_'+str(exploration_noise_type)
     writer = SummaryWriter(log_dir=log_dir)
 
     ''' OPTIMIZER, SCHEDULER DEFINITION '''
