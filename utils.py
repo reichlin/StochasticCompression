@@ -8,12 +8,6 @@ from torchvision import datasets, transforms
 import numpy as np
 
 
-def bpp(h, w, n, k_values, img_size, bits):
+def bpp(mu, symbols, h, w, n, H, W):
 
-    # number of bitsrequired to encode z masked is the number of non masked values times log_2(L): k_values * bits
-    # number of bits required to encode the mask: h * w * np.log2(n)
-
-    bpp = (k_values * bits + h * w * np.log2(n)) / img_size
-
-    return bpp
-
+    return float(mu * np.log2(symbols) + h * w * np.log2(n) + 32.*n) / float(H * W)

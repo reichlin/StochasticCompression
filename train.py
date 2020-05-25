@@ -3,126 +3,97 @@ import torch
 import torch.nn as nn
 from torchvision.datasets import ImageNet
 from tqdm import tqdm
-import network_volume as network
+import network as network
 import matplotlib as mpl
 from utils import *
 mpl.use('Agg')
 import matplotlib.pyplot as plt
 
 
-def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_optimizer, L2_a, beta, clip_gradient, idx_t, writer, device, max_grad_ever):
+def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_optimizer, L2_a, beta, clip_gradient, idx_t, writer, device, distortion_training_epochs, test_loader_padded):
 
-    for (images, _) in tqdm(train_loader):
+    for i, (images, _) in tqdm(enumerate(train_loader)):
 
         model.train()
 
         gpu_imgs = images.to(device).detach()
 
-        x_hat, log_pk, k, a, mu, z_tot, z0, z_hat, quantization_error = model(gpu_imgs)  # forward pass
-        loss_d, accuracy, accuracy_mean, img_err = model.get_loss_d(gpu_imgs, x_hat)  # compute reconstruction loss
-        loss_k, avg_cond, R, adv_err = model.get_loss_k(img_err, accuracy, k, z_tot, log_pk, a, L2_a)  # compute reinforcement learning loss
+        x_hat_compress, x_hat_k, log_pk, log_p_compression, k, k_compression, mu, a, z, quantization_error = model(gpu_imgs)
+        loss_d, accuracy, accuracy_compression_mean, accuracy_k_mean, img_err = model.get_loss_d(gpu_imgs, x_hat_compress, x_hat_k)
 
-        ''' bunch of constants for the tensorboard '''
-        z_size = torch.sum(k.detach() * model.n, (1, 2)).cpu()
-        z_size_mean = torch.mean(z_size).item()
-        z_size_max = torch.max(z_size).item()
-        z_size_min = torch.min(z_size).item()
-        accuracy_mean = accuracy_mean.item()
-        avg_cond = avg_cond.item()
-        R = torch.mean(R).item()
-        mu_img = mu.detach().cpu().clone().numpy()
-        mu_img = mu_img / np.expand_dims(np.expand_dims(np.max(mu_img, (1, 2)), -1), -1)
-        a = torch.mean(a).item()
-        c_span = torch.abs(torch.max(model.c.detach().cpu()) - torch.min(model.c.detach().cpu())).item()
-        k_values = torch.flatten(k).detach().cpu()
-        adv_err = adv_err.item()
+        if i % distortion_training_epochs == 0:
 
-        # a_prima = model.a_prima.detach().cpu().numpy()
-        # a_dopo = model.a_dopo.detach().cpu().numpy()
-        # a_weights = model.a_conv6.weight.detach().cpu().numpy()
+            loss_k, avg_cond, R = model.get_loss_k(gpu_imgs, img_err, accuracy, k, k_compression, log_pk, log_p_compression, a, L2_a)
 
-        # a_prima_neg = np.average(a_prima <= 0.)
-
-
-        ''' either optimize together or separately '''
-        if second_optimizer:
-            optimizer_k.zero_grad()
-            # model.dummy_a.retain_grad()
-            if clip_gradient:
-                torch.nn.utils.clip_grad_norm(model.parameters(), 10.)
-            loss_k.backward(retain_graph=True)
-            # grad_a = torch.flatten(model.dummy_a.grad)
-            optimizer_k.step()
-
-            optimizer_d.zero_grad()
-            loss_d.backward(retain_graph=False)
-            optimizer_d.step()
-        else:
             loss = loss_d + beta * loss_k
 
             optimizer_d.zero_grad()
             if clip_gradient:
                 torch.nn.utils.clip_grad_norm(model.parameters(), 10.)
             loss.backward(retain_graph=False)
-            max_grad = 0
-            for param in model.parameters():
-                if param.grad is not None:
-                    if torch.max(torch.abs(param.grad)) > max_grad:
-                        max_grad = torch.max(torch.abs(param.grad)).item()
             optimizer_d.step()
 
-        if max_grad > max_grad_ever:
-            max_grad_ever = max_grad
+        else:
+            loss = loss_d
 
+            optimizer_d.zero_grad()
+            if clip_gradient:
+                torch.nn.utils.clip_grad_norm(model.parameters(), 10.)
+            loss.backward(retain_graph=False)
+            optimizer_d.step()
+
+        ''' bunch of constants for the tensorboard '''
+        z_size = torch.sum(k.detach() * model.n, (1, 2)).cpu()
+        z_size_mean = torch.mean(z_size).item()
+        z_size_max = torch.max(z_size).item()
+        z_size_min = torch.min(z_size).item()
+        accuracy_k_mean = accuracy_k_mean.item()
+        accuracy_compression_mean = accuracy_compression_mean.item()
+        if i % distortion_training_epochs == 0:
+            avg_cond = avg_cond.item()
+            R = torch.mean(R).item()
+        mu_img = mu.detach().cpu().clone().numpy()
+        mu_img = mu_img / np.expand_dims(np.expand_dims(np.max(mu_img, (1, 2)), -1), -1)
+        a = torch.mean(a).item()
+        c_span = torch.abs(torch.max(model.c.detach().cpu()) - torch.min(model.c.detach().cpu())).item()
+        k_values = torch.flatten(k).detach().cpu()
 
         ''' compute the bit per pixels of the images '''
-        bpp_mean = bpp(k.shape[1], k.shape[2], model.n, z_size_mean, images.shape[-1]*images.shape[-2], np.log2(model.L))
-        bpp_max = bpp(k.shape[1], k.shape[2], model.n, z_size_max, images.shape[-1]*images.shape[-2], np.log2(model.L))
-        bpp_min = bpp(k.shape[1], k.shape[2], model.n, z_size_min, images.shape[-1]*images.shape[-2], np.log2(model.L))
+        bpp_mean = bpp(z_size_mean, model.L, k.shape[1], k.shape[2], model.n, images.shape[-1], images.shape[-2])
+        bpp_max = bpp(z_size_max, model.L, k.shape[1], k.shape[2], model.n, images.shape[-1], images.shape[-2])
+        bpp_min = bpp(z_size_min, model.L, k.shape[1], k.shape[2], model.n, images.shape[-1], images.shape[-2])
 
-        writer.add_scalar('training_accuracy', accuracy_mean, idx_t)
+        writer.add_scalar('training_accuracy', accuracy_k_mean, idx_t)
+        writer.add_scalar('training_accuracy_compression', accuracy_compression_mean, idx_t)
         writer.add_scalar('compression_average', bpp_mean, idx_t)
         writer.add_scalar('compression_max', bpp_max, idx_t)
         writer.add_scalar('compression_min', bpp_min, idx_t)
         writer.add_scalar('mean_quantization_error', quantization_error.item(), idx_t)
         writer.add_scalar('span_centroids', c_span, idx_t)
-        writer.add_scalar('cond_average', avg_cond, idx_t)
-        writer.add_scalar('R_value_average', R, idx_t)
+        if i % distortion_training_epochs == 0:
+            writer.add_scalar('cond_average', avg_cond, idx_t)
+            writer.add_scalar('R_value_average', R, idx_t)
         writer.add_scalar('mu_value_average', a, idx_t)
-        writer.add_scalar('adv_err', adv_err, idx_t)
-
-        writer.add_scalar('max_grad', max_grad, idx_t)
-        writer.add_scalar('max_grad_ever', max_grad_ever, idx_t)
-
-        if idx_t % 100 == 0 and idx_t != 0:
-            writer.add_histogram('k', k_values, idx_t)
-        # writer.add_histogram('grad_a', grad_a, idx_t)
-        #
-        # writer.add_scalar('ratio_a_prima_neg', a_prima_neg, idx_t)
-        # writer.add_histogram('a_dopo', a_dopo, idx_t)
-        # writer.add_histogram('a_6_w', a_weights, idx_t)
 
         if idx_t % 1000 == 0 and idx_t != 0:
 
+            writer.add_histogram('k', k_values, idx_t)
+
             imgs_x = images[0:3].detach().clone().numpy()
-            imgs_x_hat = x_hat[0:3].detach().cpu().clone().numpy()
+            imgs_x_hat = x_hat_k[0:3].detach().cpu().clone().numpy()
             imgs_mu_img = (np.expand_dims(mu_img, 1))[0:3]
-            z_img = z_hat[0:3,0:1].detach().cpu().clone().numpy()
-            z_img_sum = np.expand_dims(torch.sum(z_hat, dim=1)[0:3].detach().cpu().clone().numpy(), 1)
-            z0_img = z0[0:3].detach().cpu().clone().numpy()
             writer.add_images("x_hat", imgs_x_hat, int(idx_t / 1000))
             writer.add_images("x", imgs_x, int(idx_t / 1000))
             writer.add_images("mu_img", imgs_mu_img, int(idx_t / 1000))
-            writer.add_images("z_1_img", z_img, int(idx_t / 1000))
-            writer.add_images("z_sum_img", z_img_sum, int(idx_t / 1000))
-            writer.add_images("z0_img", z0_img, int(idx_t / 1000))
 
             evaluate(model, test_loader, int(idx_t / 1000), writer, device)  # test KODAK dataset
-            test_channels_order(model, test_loader, int(idx_t / 1000), writer, device)
+            test_channels_order(model, test_loader_padded, int(idx_t / 1000), writer, device)
+
+            return idx_t
 
         idx_t += 1
 
-    return idx_t, max_grad_ever
+    return idx_t
 
 
 def evaluate(model, test_loader, idx, writer, device):
@@ -133,16 +104,26 @@ def evaluate(model, test_loader, idx, writer, device):
         distortion = []
         compression = []
 
+        bins = []
+        for i in range(model.n + 1):
+            bins.append(i)
+
         for images, _ in test_loader:
 
-            accuracy, k, x_hat, _, z_hat, _, _ = model.get_accuracy(images.to(device))
-            z_size = torch.sum(k.detach() * model.n, (1, 2)).cpu()
-            compression.append(bpp(k.shape[1], k.shape[2], model.n, torch.mean(z_size).item(), 512 * 768, np.log2(model.L)))
+            accuracy, x_hat, mu = model.get_accuracy(images.to(device))
 
+            z_size = torch.sum(mu.detach() * model.n, (1, 2)).cpu()
+            compression.append(bpp(torch.mean(z_size).item(), model.L, mu.shape[1], mu.shape[2], model.n, 512., 768.))
             distortion.append(torch.mean(accuracy).cpu().clone().numpy())
 
         d = np.average(distortion)
         c = np.average(compression)
+
+        mu_values_n = torch.flatten(torch.ceil(mu * model.n)).detach().cpu().numpy()
+        fig = plt.figure()
+        plt.hist(mu_values_n, bins=bins)
+        plt.grid()
+        writer.add_figure("histogram_mu", fig, idx)
 
         x = np.linspace(0.05, 4., 1000)
         min_dist = np.square(x[0] - c)+np.square((1. - 1. / (108. * x[0])) - (d/100.))
@@ -164,7 +145,7 @@ def test_channels_order(model, test_loader, idx_v, writer, device):
 
         for images, _ in test_loader:
 
-            acc_channels, acc_channels_fat_z = model.get_information_content(images.to(device))
+            acc_channels, acc_channels_cumulative_z = model.get_information_content(images.to(device))
 
             fig = plt.figure()
             plt.plot(np.linspace(1, model.n, model.n), acc_channels)
@@ -172,9 +153,9 @@ def test_channels_order(model, test_loader, idx_v, writer, device):
             writer.add_figure("average_information_content", fig, idx_v)
 
             fig = plt.figure()
-            plt.plot(np.linspace(1, model.n, model.n), acc_channels_fat_z)
+            plt.plot(np.linspace(1, model.n, model.n), acc_channels_cumulative_z)
             plt.grid()
-            writer.add_figure("fat_information_content", fig, idx_v)
+            writer.add_figure("cumulative_information_content", fig, idx_v)
 
 
 def print_RD_curve(model, test_loader, idx_v, writer, device):
@@ -182,17 +163,16 @@ def print_RD_curve(model, test_loader, idx_v, writer, device):
     model.eval()
     with torch.no_grad():
 
+        distortion = []
+        compression = []
+
         for images, _ in test_loader:
 
-            accuracy, k, x_hat, z0, z_hat, mu, a = model.get_accuracy(images.to(device))
-            z_size = torch.sum(k.detach() * model.n, (1, 2)).cpu()
-            compression = bpp(k.shape[1], k.shape[2], model.n, z_size.numpy(), 512 * 768, np.log2(model.L))
+            accuracy, x_hat, mu = model.get_accuracy(images.to(device))
+            z_size = torch.sum(mu.detach() * model.n, (1, 2)).cpu()
+            compression.append(bpp(torch.mean(z_size).item(), model.L, mu.shape[1], mu.shape[2], model.n, 512., 768.))
 
-            distortion = accuracy.cpu().clone().numpy()
-
-        idx_sort = np.argsort(compression)
-        distortion = distortion[idx_sort]
-        compression = compression[idx_sort]
+            distortion.append(torch.mean(accuracy).cpu().clone().item())
 
         fig = plt.figure()
         c_max = np.max(compression)*1.2 if np.max(compression) > 1. else 1.
@@ -204,13 +184,18 @@ def print_RD_curve(model, test_loader, idx_v, writer, device):
         writer.add_figure("rate_distortion_KODAK", fig, idx_v)
 
         img = x_hat[0].detach().cpu().clone().numpy()
+        img_bar = np.zeros([img.shape[0], img.shape[1] + 1, img.shape[2]])
+        compression_bar = np.zeros(img.shape[2])
+        for i in range(int(np.clip(compression[0], 0, 1.0) * img.shape[2])):
+            compression_bar[i] = 1.0
+        img_bar[:, :-1, :] = img[:, :, :]
+        img_bar[:, -1, :] = compression_bar
+
         mu_img = mu.detach().cpu().clone().numpy()
         mu_img = mu_img / np.expand_dims(np.expand_dims(np.max(mu_img, (1, 2)), -1), -1)
         img_mu_img = (np.expand_dims(mu_img, 1))[0]
-        z0_img = z0[0:3].detach().cpu().clone().numpy()
-        writer.add_image("KODAK", img, idx_v)
+        writer.add_image("KODAK", img_bar, idx_v)
         writer.add_image("KODAK_mu_img", img_mu_img, idx_v)
-        writer.add_images("KODAK_z0_img", z0_img, idx_v)
 
         idx_v += 1
 
@@ -235,69 +220,61 @@ def main():
 
 
     ''' PARAMETERS '''
+
     # AUTOENCODER
     EPOCHS = 10
     Batch_size = 32
     min_accuracy = 97.0
     colors = 3
+    model_depth = 3
+    model_size = 64
     n = 64
     HW = 168
     L = 8
-
     L2 = 0.0
-    L2_a = 0.0000005
+    L2_a = 0.0
+    decoder_type = 0  # 0:deconvolution, 1:upsampling_nearest, 2:upsampling_bilinear
 
     lr_d = 0.0003
     gamma = 1.0
     lr_step_size = 1
+    clip_gradient = False
 
     lr_k = 0.0003
     second_optimizer = False
 
-    model_depth = 3
-    model_size = 64
+    # POLICY NETWORK
+    a_depth = 6
+    a_size = 32
+    a_act = 1  # 0:relu, 1:leakyrelu
 
     beta = 0.1
-
-    decoder_type = 0  # 0:deconvolution, 1:upsampling_nearest, 2:upsampling_bilinear
-
-    # POLICY NETWORK
-    a_size = 32
-    a_depth = 6
-    a_act = 1  # 0:relu, 1:leakyrelu
+    distortion_training_epochs = int(sys.argv[2])  # {1, 2, 5}
 
     # POLICY SEARCH
 
-    advantage = False
-    k_sampling_window = 1
-    clip_gradient = False
+    k_sampling_policy = int(sys.argv[3])  # 0:binary, 1:poisson
+    exploration_epsilon = 0.0
 
-    sampling_policy = int(sys.argv[2])  # 0:default,1:gaussian,2:asymmetrical,3:partial_asymmetrical,4:poisson
-    exploration_noise_type = int(sys.argv[3])  # 0:uniform,1:only_zero,2:uniform_0_mu
-    exploration_epsilon = int(sys.argv[4]) #0.1 # steady state -> 0.0
-    exploration_epsilon_decay = int(sys.argv[5]) # 0.4
+    compression_sampling_function = int(sys.argv[4])  # 0:U*mu+0.2, 1:Exponential, 2:Pareto Bounded
+    adaptive_compression_sampling = int(sys.argv[5]) == 1  # {False, True}
 
-    sigma = 0.05 #int(sys.argv[3]) #0.05 steady state -> 0.01
-    sigma_decay = 0.9 #int(sys.argv[4]) #0.9
 
     ''' MODEL DEFINITION '''
-
     model = network.Net(min_accuracy,
                         colors,
                         model_depth,
                         model_size,
                         n,
                         L,
-                        advantage,
-                        k_sampling_window,
+                        compression_sampling_function,
+                        adaptive_compression_sampling,
+                        k_sampling_policy,
                         exploration_epsilon,
-                        sampling_policy,
-                        sigma,
                         a_size,
                         a_depth,
                         a_act,
-                        decoder_type,
-                        exploration_noise_type).to(device)
+                        decoder_type).to(device)
 
     ''' DATASET LOADER '''
     trans_train = transforms.Compose([transforms.RandomHorizontalFlip(),
@@ -310,16 +287,15 @@ def main():
     train_dataset = datasets.ImageFolder(root=train_folder, transform=trans_train)
     train_loader = DataLoader(dataset=train_dataset, batch_size=Batch_size, shuffle=True, num_workers=8)
 
-    # train_dataset = ImageNet(root='/local_storage/datasets/imagenet', split='train', transform=trans_train, download=False)
-    # train_loader = DataLoader(dataset=train_dataset, batch_size=Batch_size, shuffle=True, num_workers=8)
-
-    test_dataset = datasets.ImageFolder(root="/local_storage/datasets/KODAK_padded", transform=trans_test)
-    test_loader = DataLoader(dataset=test_dataset, batch_size=24, shuffle=True, num_workers=8)
+    test_dataset = datasets.ImageFolder(root="/local_storage/datasets/KODAK", transform=trans_test)
+    test_loader = DataLoader(dataset=test_dataset, batch_size=1, shuffle=True, num_workers=8)
+    test_dataset_padded = datasets.ImageFolder(root="/local_storage/datasets/KODAK_padded", transform=trans_test)
+    test_loader_padded = DataLoader(dataset=test_dataset_padded, batch_size=24, shuffle=True, num_workers=8)
 
     ''' TENSORBOARD WRITER '''
 
-    #/Midgard/home/areichlin/compression
-    log_dir = '/Midgard/home/areichlin/compression/policy_log/sampling_policy_'+str(sampling_policy)+'_U0_'+str(exploration_epsilon)+'_Ud_'+str(exploration_epsilon_decay)+'_exp_type_'+str(exploration_noise_type)
+    name = 'd_epochs_'+str(distortion_training_epochs)+'_k_sampling_'+ str(k_sampling_policy)+'_compr_sampling_'+str(compression_sampling_function)+'_adaptive_'+str(adaptive_compression_sampling)
+    log_dir = '/Midgard/home/areichlin/compression/policy_log/'+name
     writer = SummaryWriter(log_dir=log_dir)
 
     ''' OPTIMIZER, SCHEDULER DEFINITION '''
@@ -334,32 +310,29 @@ def main():
 
     ''' TRAINING LOOP '''
 
-    max_grad_ever = 0
-
     print("start training")
 
     for epoch in range(1, EPOCHS + 1):
-        idx_t, max_grad_ever = train(model,
-                                     train_loader,
-                                     test_loader,
-                                     optimizer_d,
-                                     optimizer_k,
-                                     second_optimizer,
-                                     L2_a,
-                                     beta,
-                                     clip_gradient,
-                                     idx_t,
-                                     writer,
-                                     device,
-                                     max_grad_ever)
+        idx_t = train(model,
+                      train_loader,
+                      test_loader,
+                      optimizer_d,
+                      optimizer_k,
+                      second_optimizer,
+                      L2_a,
+                      beta,
+                      clip_gradient,
+                      idx_t,
+                      writer,
+                      device,
+                      distortion_training_epochs,
+                      test_loader_padded)
         scheduler_d.step()
-        model.exploration_epsilon *= exploration_epsilon_decay
-        model.sigma *= sigma_decay
         idx_v = print_RD_curve(model, test_loader, idx_v, writer, device)
+        print("saving model")
+        torch.save(model.state_dict(), '/Midgard/home/areichlin/compression/models/' + name + '_' + str(epoch) + '.pt')
 
     writer.close()
-
-    # TODO: add saving parameters of the best model
 
 
 if __name__ == '__main__':
