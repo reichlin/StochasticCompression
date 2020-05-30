@@ -8,4 +8,4 @@
 source "/Midgard/home/pshi/miniconda3/etc/profile.d/conda.sh"
 conda activate victor_test
 
-python /Midgard/home/pshi/alfredo/train.py ${SLURMD_NODENAME} ${EPOCHS} ${KSAMPL} ${CSAMPL} ${ADAPT}
+python /Midgard/home/pshi/alfredo/train.py ${SLURMD_NODENAME} ${ALPHA} ${DELTA}

@@ -4,17 +4,11 @@
 rm -r /Midgard/home/pshi/alfredo/experiments_scripts/slurm*
 rm -r /Midgard/home/pshi/alfredo/experiments_scripts/policy_log/sampling_policy_1_dump_pi_prob
 
-for epochs in 1 5; do
-  sbatch --export=EPOCHS=epochs,KSAMPL=1,CSAMPL=0,ADAPT=0 search_stable_policy.sbatch
-  sleep 1
-  sbatch --export=EPOCHS=epochs,KSAMPL=1,CSAMPL=1,ADAPT=0 search_stable_policy.sbatch
-  sleep 1
-  sbatch --export=EPOCHS=epochs,KSAMPL=1,CSAMPL=2,ADAPT=0 search_stable_policy.sbatch
-  sleep 1
-  sbatch --export=EPOCHS=epochs,KSAMPL=1,CSAMPL=1,ADAPT=1 search_stable_policy.sbatch
-  sleep 1
-  sbatch --export=EPOCHS=epochs,KSAMPL=1,CSAMPL=2,ADAPT=1 search_stable_policy.sbatch
-  sleep 1
+for alpha in 0.5 1.16 2.0; do
+  for delta in 0.1 0.2 0.5 0.8; do
+    sbatch --export=ALPHA=$alpha,DELTA=$delta search_stable_policy.sbatch
+    sleep 1
+  done
 done
 
 

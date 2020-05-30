@@ -10,22 +10,24 @@ mpl.use('Agg')
 import matplotlib.pyplot as plt
 
 
-def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_optimizer, L2_a, beta, clip_gradient, idx_t, writer, device, distortion_training_epochs):
+def train(model, train_loader, optimizer_d, optimizer_k, second_optimizer, L2_a, beta, clip_gradient, idx_t, writer, device, distortion_training_epochs, test_loader, test_loader_padded):
 
-    for i, (images, _) in tqdm(enumerate(train_loader)):
+    for (images, _) in train_loader:
 
         model.train()
-
-        start = time.time()
 
         gpu_imgs = images.to(device).detach()
 
         x_hat_compress, x_hat_k, log_pk, log_p_compression, k, k_compression, mu, a, z = model(gpu_imgs)
-        loss_d, accuracy_k, accuracy_c, accuracy_compression_mean, accuracy_k_mean, img_err_k, img_err_c = model.get_loss_d(gpu_imgs, x_hat_compress, x_hat_k)
+        loss_d, accuracy, accuracy_compression_mean, accuracy_k_mean, img_err_k, img_err_c = model.get_loss_d(gpu_imgs, x_hat_compress, x_hat_k)
 
-        if i % distortion_training_epochs == 0:
+        # print("l: ", torch.min(l).detach().cpu().item(), torch.mean(l).detach().cpu().item(), torch.max(l).detach().cpu().item())
+        # print("h: ", torch.min(h).detach().cpu().item(), torch.mean(h).detach().cpu().item(), torch.max(h).detach().cpu().item())
+        # print("alpha: ", torch.min(alpha).detach().cpu().item(), torch.mean(alpha).detach().cpu().item(), torch.max(alpha).detach().cpu().item())
 
-            loss_k, avg_cond, R = model.get_loss_k(gpu_imgs, img_err_k, img_err_c, accuracy_k, accuracy_c, k, k_compression, log_pk, log_p_compression, a, L2_a)
+        if idx_t % distortion_training_epochs == 0:
+
+            loss_k, avg_cond, R = model.get_loss_k(gpu_imgs, img_err_k, img_err_c, accuracy, k, k_compression, log_pk, log_p_compression, a, L2_a)
 
             loss = loss_d + beta * loss_k
 
@@ -36,6 +38,7 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
             optimizer_d.step()
 
         else:
+
             loss = loss_d
 
             optimizer_d.zero_grad()
@@ -51,7 +54,7 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
         z_size_min = torch.min(z_size).item()
         accuracy_k_mean = accuracy_k_mean.item()
         accuracy_compression_mean = accuracy_compression_mean.item()
-        if i % distortion_training_epochs == 0:
+        if idx_t % distortion_training_epochs == 0:
             avg_cond = avg_cond.item()
             R = torch.mean(R).item()
         mu_img = mu.detach().cpu().clone().numpy()
@@ -71,10 +74,13 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
         writer.add_scalar('compression_max', bpp_max, idx_t)
         writer.add_scalar('compression_min', bpp_min, idx_t)
         writer.add_scalar('span_centroids', c_span, idx_t)
-        if i % distortion_training_epochs == 0:
+        if idx_t % distortion_training_epochs == 0:
             writer.add_scalar('cond_average', avg_cond, idx_t)
             writer.add_scalar('R_value_average', R, idx_t)
         writer.add_scalar('mu_value_average', a, idx_t)
+
+        if np.isnan(loss_d.detach().cpu().numpy()):
+            return -1
 
         if idx_t % 1000 == 0 and idx_t != 0:
 
@@ -87,7 +93,8 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
             writer.add_images("x", imgs_x, int(idx_t / 1000))
             writer.add_images("mu_img", imgs_mu_img, int(idx_t / 1000))
 
-            evaluate(model, test_loader, int(idx_t / 1000), writer, device)  # test KODAK dataset
+            evaluate(model, test_loader, int(idx_t / 1000), writer, device)
+            test_channels_order(model, test_loader_padded, int(idx_t / 1000), writer, device)
 
         idx_t += 1
 
@@ -195,12 +202,10 @@ def print_RD_curve(model, test_loader, idx_v, writer, device):
         writer.add_image("KODAK", img_bar, idx_v)
         writer.add_image("KODAK_mu_img", img_mu_img, idx_v)
 
-        idx_v += 1
-
-    return idx_v
+    return
 
 
-def main():
+def main(d_epochs, k_sample, c_sample, adaptive):
 
     torch.manual_seed(1234)
 
@@ -215,13 +220,15 @@ def main():
         print("Error, wrong node")
         return
 
-    print("training on " + sys.argv[1] + " on device: " + str(device))
+    print("training on device: " + str(device))
 
 
     ''' PARAMETERS '''
 
     # AUTOENCODER
-    EPOCHS = 10
+    max_time = 3600*20
+    evaluation_time = 60*5
+    test_time = 1800
     Batch_size = 32
     min_accuracy = 97.0
     colors = 3
@@ -248,18 +255,15 @@ def main():
     a_act = 1  # 0:relu, 1:leakyrelu
 
     beta = 0.1
-    distortion_training_epochs = 1 #int(sys.argv[2])  # {1, 2, 5}
+    distortion_training_epochs = d_epochs  # {1, 2, 5}
 
     # POLICY SEARCH
 
-    k_sampling_policy = 1 #int(sys.argv[3])  # 0:binary, 1:poisson
+    k_sampling_policy = k_sample  # 0:binary, 1:poisson
     exploration_epsilon = 0.0
 
-    compression_sampling_function = 2 # int(sys.argv[4])  # 0:U*mu+0.2, 1:Exponential, 2:Pareto Bounded
-    adaptive_compression_sampling = False#int(sys.argv[5]) == 1  # {False, True}
-
-    pareto_alpha = float(sys.argv[2])
-    pareto_interval = float(sys.argv[3])
+    compression_sampling_function = c_sample  # 0:U*mu+0.2, 1:Exponential, 2:Pareto Bounded
+    adaptive_compression_sampling = adaptive == 1  # {False, True}
 
 
     ''' MODEL DEFINITION '''
@@ -277,9 +281,7 @@ def main():
                         a_depth,
                         a_act,
                         decoder_type,
-                        cuda_backend,
-                        pareto_interval,
-                        pareto_alpha).to(device)
+                        cuda_backend).to(device)
 
     ''' DATASET LOADER '''
     trans_train = transforms.Compose([transforms.RandomHorizontalFlip(),
@@ -299,8 +301,8 @@ def main():
 
     ''' TENSORBOARD WRITER '''
 
-    name = 'Bounded_Pareto_alpha_'+str(pareto_alpha)+'_delta_'+str(pareto_interval)
-    log_dir = '/Midgard/home/areichlin/compression/pareto_experiments/'+name
+    name = 'd_epochs_'+str(distortion_training_epochs)+'_k_sampling_'+str(k_sampling_policy)+'_c_sampling_'+str(compression_sampling_function)+'_adaptive_'+str(adaptive_compression_sampling)
+    log_dir = "/Midgard/home/areichlin/compression/overfit_log/"+name
     writer = SummaryWriter(log_dir=log_dir)
 
     ''' OPTIMIZER, SCHEDULER DEFINITION '''
@@ -312,15 +314,21 @@ def main():
 
     idx_t = 0
     idx_v = 0
+    idx_ev = 0
 
     ''' TRAINING LOOP '''
 
     print("start training")
 
-    for epoch in range(1, EPOCHS + 1):
+    general_timer = time.time()
+    evaluation_timer = time.time()
+    test_timer = time.time()
+
+    epoch = 1
+
+    while (time.time()-general_timer) < max_time:
         idx_t = train(model,
                       train_loader,
-                      test_loader,
                       optimizer_d,
                       optimizer_k,
                       second_optimizer,
@@ -330,15 +338,40 @@ def main():
                       idx_t,
                       writer,
                       device,
-                      distortion_training_epochs)
+                      distortion_training_epochs,
+                      test_loader,
+                      test_loader_padded)
+        if idx_t == -1:
+            print("NaN detected")
+            break
         scheduler_d.step()
-        test_channels_order(model, test_loader_padded, idx_v, writer, device)
-        idx_v = print_RD_curve(model, test_loader, idx_v, writer, device)
-        print("saving model")
-        torch.save(model.state_dict(), '/Midgard/home/areichlin/compression/models/' + name + '_' + str(epoch) + '.pt')
+        print_RD_curve(model, test_loader, idx_v, writer, device)
+        idx_v += 1
+
+        # if (time.time() - evaluation_timer) > evaluation_time:
+        #     evaluate(model, test_loader, idx_ev, writer, device)
+        #     test_channels_order(model, test_loader_padded, idx_ev, writer, device)
+        #     evaluation_timer = time.time()
+        #     idx_ev += 1
+        # if (time.time()-test_timer) > test_time:
+        #     print_RD_curve(model, test_loader, idx_v, writer, device)
+        #     test_timer = time.time()
+        #     idx_v += 1
+        epoch += 1
 
     writer.close()
 
 
 if __name__ == '__main__':
-    main()
+    '''
+    distortion_training_epochs = int(sys.argv[2])  # {1, 2, 5}
+    k_sampling_policy = int(sys.argv[3])  # 0:binary, 1:poisson
+    compression_sampling_function = int(sys.argv[4])  # 0:U*mu+0.2, 1:Exponential, 2:Pareto Bounded
+    adaptive_compression_sampling = int(sys.argv[5]) == 1  # {False, True}
+    '''
+    main(d_epochs=10, k_sample=1, c_sample=2, adaptive=1)
+    # for d_epochs in [1, 2, 5]:
+    #     for k_sample in [1, 0]:
+    #         for adaptive in [0, 1]:
+    #             for c_sample in [0, 1, 2]:
+    #                 main(d_epochs, k_sample, c_sample, adaptive)
