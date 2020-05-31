@@ -97,7 +97,7 @@ class BodyModel(nn.Module):
     a_depth = depth of the mu network
     a_act = leaky_relu
     decoder_type = 0: deconvolutions 1: upsampling nearest, 2: upsampling bilinear
-    cuda_backend = True: if usinga GPU, False: if using a CPU
+    cuda_backend = True: if using a GPU, False: if using a CPU
 '''
 class Net(nn.Module):
 
@@ -301,7 +301,7 @@ class Net(nn.Module):
                 k = k * torch.ceil(torch.FloatTensor(k.shape).uniform_())
 
             n = float(self.n)
-            k = ((torch.round(mu * n) + k) / n).detach()
+            k = (torch.round(mu * n) + k) / n
             if self.cuda_backend:
                 cond = (torch.cuda.FloatTensor(k.shape).uniform_()).ge(self.exploration_epsilon)
                 k = cond * k + ~cond * (torch.round(torch.cuda.FloatTensor(k.shape).uniform_() * n) / n)
@@ -309,7 +309,9 @@ class Net(nn.Module):
                 cond = (torch.FloatTensor(k.shape).uniform_()).ge(self.exploration_epsilon)
                 k = cond * k + ~cond * (torch.round(torch.FloatTensor(k.shape).uniform_() * n) / n)
 
-            log_pk = - torch.pow((k - mu), 2)
+            k = k.detach()
+
+            log_pk = - torch.pow((k.detach() - mu), 2)
 
         elif self.k_sampling_policy == 1:  # poisson
 
@@ -325,7 +327,7 @@ class Net(nn.Module):
                 cond = (torch.FloatTensor(k.shape).uniform_()).ge(self.exploration_epsilon)
                 k = cond * k + ~cond * (torch.round(torch.FloatTensor(k.shape).uniform_() * n))  # [0, n]
 
-            log_pk = m.log_prob(k)
+            log_pk = m.log_prob(k.detach())
             k = (k / n).detach()
 
         return k, log_pk
@@ -373,22 +375,22 @@ class Net(nn.Module):
                     u = torch.cuda.FloatTensor(mu.shape).uniform_()
                 else:
                     u = torch.FloatTensor(mu.shape).uniform_()
-                k_compression = u * (h - l) + l
+                k_compression = (u * (h - l) + l).detach()
                 log_p_compression = torch.log(1./(h-l))
-                k_compression = k_compression / self.n
+                k_compression = (k_compression / self.n).detach()
 
             elif self.compression_sampling_function == 1:  # exponential
 
                 m = Exponential(alpha)
                 k_compression = torch.clamp(m.sample() + l, 0, self.n)
                 log_p_compression = torch.log(alpha * torch.exp(-alpha*k_compression) + l)
-                k_compression = k_compression / self.n
+                k_compression = (k_compression / self.n).detach()
 
             elif self.compression_sampling_function == 2:  # bounded pareto
 
-                k_compression = torch.clamp(self.sample_bounded_Pareto(mu.shape, alpha, l, h), 0, self.n)
+                k_compression = (torch.clamp(self.sample_bounded_Pareto(mu.shape, alpha, l, h), 0, self.n)).detach()
                 log_p_compression = torch.log(self.bounded_Pareto_prob(k_compression, alpha, l, h))
-                k_compression = k_compression / self.n
+                k_compression = (k_compression / self.n).detach()
 
         else:
 
@@ -483,8 +485,6 @@ class Net(nn.Module):
     '''
     def get_loss_d(self, x, x_hat_compress, x_hat_k):
 
-        start = time.time()
-
         img_err_k = torch.abs(x - x_hat_k)
         img_err_c = torch.abs(x - x_hat_compress)
 
@@ -499,7 +499,6 @@ class Net(nn.Module):
         else:
             loss_distortion = torch.mean(torch.abs(x - x_hat_compress), (1, 2, 3))
 
-        #loss_distortion = 1 - msssim_compress
         accuracy_k = 100 * msssim_k
         accuracy_c = 100 * msssim_compress
 

@@ -61,7 +61,7 @@ def main():
     a_size = 32
     a_act = 1  # 0:relu, 1:leakyrelu
 
-    adaptive_compression_sampling = False
+    adaptive_compression_sampling = True
 
     # POLICY SEARCH
     ''' MODEL DEFINITION '''
@@ -84,24 +84,61 @@ def main():
     test_loader = DataLoader(dataset=test_dataset, batch_size=1, shuffle=True, num_workers=8)
 
     device = torch.device('cpu')
-    model.load_state_dict(torch.load('../models/experiment_6_epoch_10.pt', map_location=device))
+    model.load_state_dict(torch.load('../models/Bounded_Pareto_adaptive_4.pt', map_location=device))
     model.eval()
 
-    frq_symbols = np.zeros([24, 96*64, 64, L+1])
-    symbols = torch.linspace((-L / 2.) * model_size, (L / 2.) * model_size, L)
+    optimizer = optim.Adam(model.parameters(), lr=0.0003)
+
+    # frq_symbols = np.zeros([24, 96*64, 64, L+1])
+    # symbols = torch.linspace((-L / 2.) * model_size, (L / 2.) * model_size, L)
 
     mus = None
 
     for b, (images, _) in tqdm(enumerate(test_loader)):
 
-        _, z, mu, _ = model.E(images)
-        z, _ = model.quantize(z)
-        z = model.mask_z(z, mu)
+        x_hat_compress, x_hat_k, k, k_compression, mu, a, z, quantization_error, log_pk, log_p_compression, l, h, alpha = model(images)
+        loss_d, accuracy_k, accuracy_c, accuracy_compression_mean, accuracy_k_mean, img_err_k, img_err_c = model.get_loss_d(images, x_hat_compress, x_hat_k)
+        loss_k, avg_cond, R_k, R_c = model.get_loss_k(images, img_err_k, img_err_c, accuracy_k, accuracy_c, k, k_compression, log_pk, log_p_compression, a, 0.0)
 
-        if mus is None:
-            mus = torch.flatten(mu).detach().cpu()
-        else:
-            np.concatenate()
+        loss = loss_d + 0.1 * loss_k
+
+        optimizer.zero_grad()
+        # model.dummy_l.retain_grad()
+        # model.dummy_lprima.retain_grad()
+        # model.dummy_lp.retain_grad()
+        # model.dummy_p.retain_grad()
+        # model.dummy_log_p.retain_grad()
+        loss.backward(retain_graph=False)
+        # grad_l = model.dummy_l.grad
+        # grad_lprima = model.dummy_lprima.grad
+        # grad_lp = model.dummy_lp.grad
+        # grad_p = model.dummy_p.grad
+        # grad_log_p = model.dummy_log_p.grad
+        # plt.imshow(grad_log_p[0].detach())
+        # plt.show()
+        # dpdl = ((alpha[0, 0, 0] ** 2) * l[0, 0, 0] ** (alpha[0, 0, 0] - 1) * (k_compression[0, 0, 0] * 64) ** (-alpha[0, 0, 0] - 1)) / (
+        #             (1. - (l[0, 0, 0] / h[0, 0, 0]) ** alpha[0, 0, 0]) ** 2)
+        # print(torch.mean((grad > 0)*1.0))
+        optimizer.step()
+
+        plt.imshow(images.permute(0,2,3,1)[0])
+        plt.show()
+        plt.imshow(x_hat_k.permute(0,2,3,1)[0].detach())
+        plt.show()
+        plt.imshow(x_hat_compress.permute(0, 2, 3, 1)[0].detach())
+        plt.show()
+
+        print()
+
+
+        # _, z, mu, _ = model.E(images)
+        # z, _ = model.quantize(z)
+        # z = model.mask_z(z, mu)
+        #
+        # if mus is None:
+        #     mus = torch.flatten(mu).detach().cpu()
+        # else:
+        #     np.concatenate()
 
         # for h in range(z.shape[2]):
         #     for w in range(z.shape[3]):

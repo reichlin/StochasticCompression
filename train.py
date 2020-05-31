@@ -1,7 +1,6 @@
 import time
 import torch
 import torch.nn as nn
-from torchvision.datasets import ImageNet
 from tqdm import tqdm
 import network as network
 import matplotlib as mpl
@@ -15,8 +14,6 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
     for i, (images, _) in tqdm(enumerate(train_loader)):
 
         model.train()
-
-        start = time.time()
 
         gpu_imgs = images.to(device).detach()
 
@@ -256,10 +253,10 @@ def main():
     exploration_epsilon = 0.0
 
     compression_sampling_function = 2 # int(sys.argv[4])  # 0:U*mu+0.2, 1:Exponential, 2:Pareto Bounded
-    adaptive_compression_sampling = False#int(sys.argv[5]) == 1  # {False, True}
+    adaptive_compression_sampling = True#int(sys.argv[5]) == 1  # {False, True}
 
-    pareto_alpha = float(sys.argv[2])
-    pareto_interval = float(sys.argv[3])
+    pareto_alpha = 1.16#float(sys.argv[2])
+    pareto_interval = 0.5#float(sys.argv[3])
 
 
     ''' MODEL DEFINITION '''
@@ -299,7 +296,7 @@ def main():
 
     ''' TENSORBOARD WRITER '''
 
-    name = 'Bounded_Pareto_alpha_'+str(pareto_alpha)+'_delta_'+str(pareto_interval)
+    name = 'Bounded_Pareto_adaptive' #_alpha_'+str(pareto_alpha)+'_delta_'+str(pareto_interval)
     log_dir = '/Midgard/home/areichlin/compression/pareto_experiments/'+name
     writer = SummaryWriter(log_dir=log_dir)
 
