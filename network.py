@@ -375,3 +375,74 @@ class Net(nn.Module):
         return acc_channels, acc_channels_cumulative_z
 
 
+if __name__ == '__main__':
+    cuda_backend = torch.cuda.is_available()
+
+    EPOCHS = 10
+    Batch_size = 32
+    min_accuracy = 97.0
+    colors = 3
+    model_depth = 3
+    model_size = 64
+    n = 64
+    HW = 168
+    L = 8
+    L2 = 0.0
+    L2_a = 0.0
+    decoder_type = 0  # 0:deconvolution, 1:upsampling_nearest, 2:upsampling_bilinear
+
+    lr_d = 0.0003
+    gamma = 1.0
+    lr_step_size = 1
+    clip_gradient = False
+
+    lr_k = 0.0003
+    second_optimizer = False
+
+    # POLICY NETWORK
+    a_depth = 6
+    a_size = 32
+    a_act = 1  # 0:relu, 1:leakyrelu
+
+    beta = 0.1
+    distortion_training_epochs = 1  # int(sys.argv[2])  # {1, 2, 5}
+
+    # POLICY SEARCH
+
+    k_sampling_policy = 1  # int(sys.argv[3])  # 0:binary, 1:poisson
+    exploration_epsilon = 0.0
+
+    compression_sampling_function = 2  # int(sys.argv[4])  # 0:U*mu+0.2, 1:Exponential, 2:Pareto Bounded
+    adaptive_compression_sampling = True  # int(sys.argv[5]) == 1  # {False, True}
+
+    pareto_alpha = 1.16  # float(sys.argv[2])
+    pareto_interval = 0.5  # float(sys.argv[3])
+
+    model = Net(min_accuracy,
+                colors,
+                model_depth,
+                model_size,
+                n,
+                L,
+                compression_sampling_function,
+                adaptive_compression_sampling,
+                k_sampling_policy,
+                exploration_epsilon,
+                a_size,
+                a_depth,
+                a_act,
+                decoder_type,
+                cuda_backend,
+                pareto_interval,
+                pareto_alpha)
+
+    b = 32
+    c = 3
+    h_tr = w_tr = 168  # msssim fucks up if < 168. If msssim = 0, then d/dx msssim = nan.
+    h_te = 768
+    w_te = 512
+
+    x_tr = torch.rand(b, c, h_tr, w_tr)
+    x_te = torch.rand(b, c, h_te, w_te)
+
+    model(x_tr)
