@@ -79,7 +79,7 @@ def main():
     ''' DATASET LOADER '''
     trans_test = transforms.Compose([transforms.ToTensor()])
 
-    test_dataset = datasets.ImageFolder(root="../data/Kodak", transform=trans_test)
+    test_dataset = datasets.ImageFolder(root="./Kodak", transform=trans_test)
     test_loader = DataLoader(dataset=test_dataset, batch_size=1, shuffle=True, num_workers=8)
 
     device = torch.device('cpu')
