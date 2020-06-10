@@ -10,4 +10,4 @@ import numpy as np
 
 def bpp(mu, symbols, h, w, n, H, W):
 
-    return float(mu * np.log2(symbols) + h * w * np.log2(n) + 32.*n) / float(H * W)
+    return float(mu * np.log2(symbols) + h * w * np.log2(n)) / float(H * W)
