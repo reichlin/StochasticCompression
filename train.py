@@ -9,7 +9,7 @@ mpl.use('Agg')
 import matplotlib.pyplot as plt
 
 
-def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_optimizer, L2_a, beta, clip_gradient, idx_t, writer, device, distortion_training_epochs):
+def train(model, train_loader, test_loader, optimizer_d, beta, idx_t, writer, device):
 
     for i, (images, _) in tqdm(enumerate(train_loader)):
 
@@ -17,29 +17,15 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
 
         gpu_imgs = images.to(device).detach()
 
-        x_hat_compress, x_hat_k, log_pk, log_p_compression, k, k_compression, mu, a, z = model(gpu_imgs)
-        loss_d, accuracy_k, accuracy_c, accuracy_compression_mean, accuracy_k_mean, img_err_k, img_err_c = model.get_loss_d(gpu_imgs, x_hat_compress, x_hat_k)
+        x_hat_compress, x_hat_k, log_pk, k, k_compression, mu, z = model(gpu_imgs)
+        loss_d, accuracy_k, accuracy_compression_mean, accuracy_k_mean, img_err_k = model.get_loss_d(gpu_imgs, x_hat_compress, x_hat_k)
+        loss_k, avg_cond, R = model.get_loss_k(gpu_imgs, img_err_k, accuracy_k, k, log_pk)
 
-        if i % distortion_training_epochs == 0:
+        loss = loss_d + beta * loss_k
 
-            loss_k, avg_cond, R = model.get_loss_k(gpu_imgs, img_err_k, img_err_c, accuracy_k, accuracy_c, k, k_compression, log_pk, log_p_compression, a, L2_a)
-
-            loss = loss_d + beta * loss_k
-
-            optimizer_d.zero_grad()
-            if clip_gradient:
-                torch.nn.utils.clip_grad_norm(model.parameters(), 10.)
-            loss.backward(retain_graph=False)
-            optimizer_d.step()
-
-        else:
-            loss = loss_d
-
-            optimizer_d.zero_grad()
-            if clip_gradient:
-                torch.nn.utils.clip_grad_norm(model.parameters(), 10.)
-            loss.backward(retain_graph=False)
-            optimizer_d.step()
+        optimizer_d.zero_grad()
+        loss.backward(retain_graph=False)
+        optimizer_d.step()
 
         ''' bunch of constants for the tensorboard '''
         z_size = torch.sum(k.detach() * model.n, (1, 2)).cpu()
@@ -48,12 +34,10 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
         z_size_min = torch.min(z_size).item()
         accuracy_k_mean = accuracy_k_mean.item()
         accuracy_compression_mean = accuracy_compression_mean.item()
-        if i % distortion_training_epochs == 0:
-            avg_cond = avg_cond.item()
-            R = torch.mean(R).item()
+        avg_cond = avg_cond.item()
+        R = torch.mean(R).item()
         mu_img = mu.detach().cpu().clone().numpy()
         mu_img = mu_img / np.expand_dims(np.expand_dims(np.max(mu_img, (1, 2)), -1), -1)
-        a = torch.mean(a).item()
         c_span = torch.abs(torch.max(model.c.detach().cpu()) - torch.min(model.c.detach().cpu())).item()
         k_values = torch.flatten(k).detach().cpu()
 
@@ -68,9 +52,8 @@ def train(model, train_loader, test_loader, optimizer_d, optimizer_k, second_opt
         writer.add_scalar('compression_max', bpp_max, idx_t)
         writer.add_scalar('compression_min', bpp_min, idx_t)
         writer.add_scalar('span_centroids', c_span, idx_t)
-        if i % distortion_training_epochs == 0:
-            writer.add_scalar('cond_average', avg_cond, idx_t)
-            writer.add_scalar('R_value_average', R, idx_t)
+        writer.add_scalar('cond_average', avg_cond, idx_t)
+        writer.add_scalar('R_value_average', R, idx_t)
         writer.add_scalar('mu_value_average', a, idx_t)
 
         if idx_t % 1000 == 0 and idx_t != 0:
@@ -214,7 +197,6 @@ def main():
 
     print("training on " + sys.argv[1] + " on device: " + str(device))
 
-
     ''' PARAMETERS '''
 
     # AUTOENCODER
@@ -224,39 +206,20 @@ def main():
     colors = 3
     model_depth = 3
     model_size = 64
-    n = 64
     HW = 168
+
     L = 8
-    L2 = 0.0
-    L2_a = 0.0
-    decoder_type = 0  # 0:deconvolution, 1:upsampling_nearest, 2:upsampling_bilinear
+
+    n = 64
 
     lr_d = 0.0003
     gamma = 1.0
     lr_step_size = 1
-    clip_gradient = False
 
-    lr_k = 0.0003
-    second_optimizer = False
+    beta = 0.1 #0.01
 
-    # POLICY NETWORK
-    a_depth = 6
-    a_size = 32
-    a_act = 1  # 0:relu, 1:leakyrelu
-
-    beta = 0.1
-    distortion_training_epochs = 1 #int(sys.argv[2])  # {1, 2, 5}
-
-    # POLICY SEARCH
-
-    k_sampling_policy = 1 #int(sys.argv[3])  # 0:binary, 1:poisson
-    exploration_epsilon = 0.0
-
-    compression_sampling_function = 2 # int(sys.argv[4])  # 0:U*mu+0.2, 1:Exponential, 2:Pareto Bounded
-    adaptive_compression_sampling = True#int(sys.argv[5]) == 1  # {False, True}
-
-    pareto_alpha = 1.16#float(sys.argv[2])
-    pareto_interval = 0.5#float(sys.argv[3])
+    pareto_alpha = 0.5
+    pareto_interval = 0.15
 
 
     ''' MODEL DEFINITION '''
@@ -266,14 +229,6 @@ def main():
                         model_size,
                         n,
                         L,
-                        compression_sampling_function,
-                        adaptive_compression_sampling,
-                        k_sampling_policy,
-                        exploration_epsilon,
-                        a_size,
-                        a_depth,
-                        a_act,
-                        decoder_type,
                         cuda_backend,
                         pareto_interval,
                         pareto_alpha).to(device)
@@ -296,14 +251,13 @@ def main():
 
     ''' TENSORBOARD WRITER '''
 
-    name = 'Bounded_Pareto_adaptive' #_alpha_'+str(pareto_alpha)+'_delta_'+str(pareto_interval)
+    name = 'Pareto_15_L_'+str(L)+'_HW_'+str(HW)+'_double_loss_'+str(double_loss)
     log_dir = '/Midgard/home/areichlin/compression/pareto_experiments/'+name
     writer = SummaryWriter(log_dir=log_dir)
 
     ''' OPTIMIZER, SCHEDULER DEFINITION '''
 
-    optimizer_d = optim.Adam(model.parameters(), lr=lr_d, weight_decay=L2)
-    optimizer_k = optim.Adam(model.parameters(), lr=lr_k)
+    optimizer_d = optim.Adam(model.parameters(), lr=lr_d)
 
     scheduler_d = StepLR(optimizer_d, step_size=lr_step_size, gamma=gamma)
 
@@ -319,15 +273,10 @@ def main():
                       train_loader,
                       test_loader,
                       optimizer_d,
-                      optimizer_k,
-                      second_optimizer,
-                      L2_a,
                       beta,
-                      clip_gradient,
                       idx_t,
                       writer,
-                      device,
-                      distortion_training_epochs)
+                      device)
         scheduler_d.step()
         test_channels_order(model, test_loader_padded, idx_v, writer, device)
         idx_v = print_RD_curve(model, test_loader, idx_v, writer, device)

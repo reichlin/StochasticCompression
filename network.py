@@ -81,27 +81,10 @@ class BodyModel(nn.Module):
 
         return y
 
-'''
-    general network class:
-    min_accuracy = accuracy threshold from focusing to accuracy to focusing on compression
-    colors = 3
-    depth = depth of the body for both encoder and decoder
-    model_size = size of the body for both encoder and decoder
-    n = length of each z_i patch
-    L = number of symbols used in the quantization
-    compression_sampling_function = 0: uniform mu, 1: exponential, 2: bounded pareto
-    adaptive_compression_sampling = 0: some function of mu, 1: learned parameters
-    k_sampling_policy = 0: mu +- 1, 1: poisson
-    exploration_epsilon = noise on k sampling
-    a_size = size of the mu network
-    a_depth = depth of the mu network
-    a_act = leaky_relu
-    decoder_type = 0: deconvolutions 1: upsampling nearest, 2: upsampling bilinear
-    cuda_backend = True: if using a GPU, False: if using a CPU
-'''
+
 class Net(nn.Module):
 
-    def __init__(self, min_accuracy, colors, depth, model_size, n, L, compression_sampling_function, adaptive_compression_sampling, k_sampling_policy, exploration_epsilon, a_size, a_depth, a_act, decoder_type, cuda_backend, pareto_interval, pareto_alpha):
+    def __init__(self, min_accuracy, colors, depth, model_size, n, L, cuda_backend, pareto_interval, pareto_alpha):
         super(Net, self).__init__()
 
         # constants for the architecture of the model
@@ -110,15 +93,6 @@ class Net(nn.Module):
         self.depth = depth
         self.colors = colors
         self.cuda_backend = cuda_backend
-
-        self.compression_sampling_function = compression_sampling_function  # 0: uniform mu, 1: exponential, 2: bounded pareto
-        self.adaptive_compression_sampling = adaptive_compression_sampling
-        self.k_sampling_policy = k_sampling_policy  # 0: binary, 1: Poisson
-        self.exploration_epsilon = exploration_epsilon
-
-        self.a_size = a_size
-        self.a_depth = a_depth
-        self.a_act = a_act
 
         self.pareto_interval = pareto_interval
         self.pareto_alpha = pareto_alpha
@@ -147,91 +121,38 @@ class Net(nn.Module):
             nn.ZeroPad2d((1, 2, 1, 2)),
             nn.Conv2d(in_channels=model_size, out_channels=(self.n + 1), kernel_size=5, stride=2, padding=(0, 0)))
 
-        if decoder_type == 1:
-            up_mode = 'nearest'
-        else:
-            up_mode = 'bilinear'
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=self.n, out_channels=model_size, kernel_size=6, stride=2, padding=(2, 2)),
+            nn.BatchNorm2d(model_size),
+            nn.ReLU(),
+            BodyModel(model_size, depth),
+            nn.ConvTranspose2d(in_channels=model_size, out_channels=int(model_size / 2), kernel_size=6, stride=2, padding=(2, 2)),
+            nn.BatchNorm2d(int(model_size / 2)),
+            nn.ReLU(),
+            nn.ConvTranspose2d(in_channels=int(model_size / 2), out_channels=colors, kernel_size=6, stride=2, padding=(2, 2)))
 
-        if decoder_type == 0:
-            self.decoder = nn.Sequential(
-                nn.ConvTranspose2d(in_channels=self.n, out_channels=model_size, kernel_size=6, stride=2, padding=(2, 2)),
-                nn.BatchNorm2d(model_size),
-                nn.ReLU(),
-                BodyModel(model_size, depth),
-                nn.ConvTranspose2d(in_channels=model_size, out_channels=int(model_size / 2), kernel_size=6, stride=2, padding=(2, 2)),
-                nn.BatchNorm2d(int(model_size / 2)),
-                nn.ReLU(),
-                nn.ConvTranspose2d(in_channels=int(model_size / 2), out_channels=colors, kernel_size=6, stride=2, padding=(2, 2)))
-        else:
-            self.decoder = nn.Sequential(
-                nn.Upsample(scale_factor=2, mode=up_mode),
-                nn.Conv2d(in_channels=self.n, out_channels=model_size, kernel_size=5, stride=1, padding=(2, 2)),
-                nn.BatchNorm2d(model_size),
-                nn.ReLU(),
-                BodyModel(model_size, depth),
-                nn.Upsample(scale_factor=2, mode=up_mode),
-                nn.Conv2d(in_channels=model_size, out_channels=int(model_size / 2), kernel_size=5, stride=1, padding=(2, 2)),
-                nn.BatchNorm2d(int(model_size / 2)),
-                nn.ReLU(),
-                nn.Upsample(scale_factor=2, mode=up_mode),
-                nn.Conv2d(in_channels=int(model_size / 2), out_channels=colors, kernel_size=5, stride=1, padding=(2, 2)))
+        self.a_1 = nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=32, kernel_size=3, stride=1, padding=(1, 1)),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3, stride=1, padding=(1, 1)),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=32, out_channels=self.n, kernel_size=3, stride=1, padding=(1, 1)))
 
-        if self.a_act == 0:
-            a_act = nn.ReLU()
-        else:
-            a_act = nn.LeakyReLU()
+        self.a_2 = nn.Sequential(
+            nn.Conv2d(in_channels=(2 * self.n), out_channels=32, kernel_size=3, stride=1, padding=(1, 1)),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=32, out_channels=16, kernel_size=3, stride=1, padding=(1, 1)),
+            nn.BatchNorm2d(16),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=16, out_channels=1, kernel_size=3, stride=1, padding=(1, 1)))
 
-        if self.a_depth == 6:
-            self.a_1 = nn.Sequential(
-                nn.Conv2d(in_channels=1, out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
-                nn.BatchNorm2d(self.a_size),
-                a_act,
-                nn.Conv2d(in_channels=self.a_size, out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
-                nn.BatchNorm2d(self.a_size),
-                a_act,
-                nn.Conv2d(in_channels=self.a_size, out_channels=self.n, kernel_size=3, stride=1, padding=(1, 1)))
-
-            self.a_2 = nn.Sequential(
-                nn.Conv2d(in_channels=(2 * self.n), out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
-                nn.BatchNorm2d(self.a_size),
-                a_act,
-                nn.Conv2d(in_channels=self.a_size, out_channels=int(self.a_size/2.), kernel_size=3, stride=1, padding=(1, 1)),
-                nn.BatchNorm2d(int(self.a_size/2.)),
-                a_act)
-
-        elif self.a_depth == 8:
-            self.a_1 = nn.Sequential(
-                nn.Conv2d(in_channels=1, out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
-                nn.BatchNorm2d(self.a_size),
-                a_act,
-                nn.Conv2d(in_channels=self.a_size, out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
-                nn.BatchNorm2d(self.a_size),
-                a_act,
-                nn.Conv2d(in_channels=self.a_size, out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
-                nn.BatchNorm2d(self.a_size),
-                a_act,
-                nn.Conv2d(in_channels=self.a_size, out_channels=self.n, kernel_size=3, stride=1, padding=(1, 1)))
-
-            self.a_2 = nn.Sequential(
-                nn.Conv2d(in_channels=(2 * self.n), out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
-                nn.BatchNorm2d(self.a_size),
-                a_act,
-                nn.Conv2d(in_channels=self.a_size, out_channels=self.a_size, kernel_size=3, stride=1, padding=(1, 1)),
-                nn.BatchNorm2d(self.a_size),
-                a_act,
-                nn.Conv2d(in_channels=self.a_size, out_channels=int(self.a_size / 2.), kernel_size=3, stride=1, padding=(1, 1)),
-                nn.BatchNorm2d(int(self.a_size / 2.)),
-                a_act)
-
-        if self.adaptive_compression_sampling:
-            self.Alpha = nn.Conv2d(in_channels=int(self.a_size / 2.), out_channels=4, kernel_size=3, stride=1, padding=(1, 1))
-        else:
-            self.Alpha = nn.Conv2d(in_channels=int(self.a_size / 2.), out_channels=1, kernel_size=3, stride=1, padding=(1, 1))
-
-        self.msssim_k = MS_SSIM(data_range=1.0, size_average=False, channel=3, nonnegative_ssim=True)
-        self.msssim_c = MS_SSIM(data_range=1.0, size_average=False, channel=3, nonnegative_ssim=True)
-        self.msssim_inf = MS_SSIM(data_range=1.0, size_average=False, channel=3, nonnegative_ssim=True)
-        self.msssim_test = MS_SSIM(data_range=255, size_average=False, channel=3, nonnegative_ssim=True)
+        self.msssim_k = MS_SSIM(data_range=1.0, size_average=False, channel=3)#, nonnegative_ssim=True)
+        self.msssim_c = MS_SSIM(data_range=1.0, size_average=False, channel=3)#, nonnegative_ssim=True)
+        self.msssim_inf = MS_SSIM(data_range=1.0, size_average=False, channel=3)#, nonnegative_ssim=True)
+        self.msssim_test = MS_SSIM(data_range=255, size_average=False, channel=3)#, nonnegative_ssim=True)
 
     '''
         Encoder
@@ -246,34 +167,10 @@ class Net(nn.Module):
         a = self.a_1(z0)
         a = torch.cat((a, z.detach()), 1)
         a = self.a_2(a)  # [B, 1, H, W]
-        a = self.Alpha(a)  # [B, {1 or 4}, H, W] 1 if non adaptive, 4 if adaptive
 
-        if self.adaptive_compression_sampling:
+        mu = torch.sigmoid(a[:, 0, :, :])
 
-            alfa = torch.sigmoid(a)
-            mu = alfa[:, 0, :, :]
-
-            # bound the parameters for the compression sampling distribution
-            if self.compression_sampling_function == 0:  # linear sampling
-                alpha = None
-                l = alfa[:, 1, :, :] * (float(self.n / 2.) - 1.) + 1.
-                h = alfa[:, 2, :, :] * (float(self.n) - (l + 3)) + (l + 3)
-            elif self.compression_sampling_function == 1:  # exponential sampling
-                alpha = alfa[:, 1, :, :] * (2. - 0.01) + 0.01
-                l = alfa[:, 2, :, :] * (float(self.n) - 1.) + 1.
-                h = None
-            elif self.compression_sampling_function == 2:  # bounded pareto sampling
-                alpha = alfa[:, 1, :, :] * (2. - 0.01) + 0.01
-                l = alfa[:, 2, :, :] * (float(self.n / 2.) - 1.) + 1.
-                h = alfa[:, 3, :, :] * (float(self.n) - (l + 3)) + (l + 3)
-
-        else:
-            mu = torch.sigmoid(a[:, 0, :, :])
-            alpha = None
-            l = None
-            h = None
-
-        return z, mu, alpha, l, h, a
+        return z, mu
 
     '''
         Decoder
@@ -290,45 +187,13 @@ class Net(nn.Module):
     '''
     def sample_k(self, mu):
 
-        if self.k_sampling_policy == 0:  # mu +- 1
+        n = float(self.n)
 
-            probs = self.probs.view(-1, 1, 1).repeat(mu.shape[0], mu.shape[1], mu.shape[2])
-            sampling_distribution = Bernoulli(probs)
-            k = sampling_distribution.sample() * 2 - 1  # [B, 1, H, W] # {-1, 1}
-            if self.cuda_backend:
-                k = k * torch.ceil(torch.cuda.FloatTensor(k.shape).uniform_())
-            else:
-                k = k * torch.ceil(torch.FloatTensor(k.shape).uniform_())
+        m = Poisson(mu * n)
+        k = torch.clamp(m.sample(), 0., n)
 
-            n = float(self.n)
-            k = (torch.round(mu * n) + k) / n
-            if self.cuda_backend:
-                cond = (torch.cuda.FloatTensor(k.shape).uniform_()).ge(self.exploration_epsilon)
-                k = cond * k + ~cond * (torch.round(torch.cuda.FloatTensor(k.shape).uniform_() * n) / n)
-            else:
-                cond = (torch.FloatTensor(k.shape).uniform_()).ge(self.exploration_epsilon)
-                k = cond * k + ~cond * (torch.round(torch.FloatTensor(k.shape).uniform_() * n) / n)
-
-            k = k.detach()
-
-            log_pk = - torch.pow((k.detach() - mu), 2)
-
-        elif self.k_sampling_policy == 1:  # poisson
-
-            n = float(self.n)
-
-            m = Poisson(mu * n)
-            k = torch.clamp(m.sample(), 0., n)
-
-            if self.cuda_backend:
-                cond = (torch.cuda.FloatTensor(k.shape).uniform_()).ge(self.exploration_epsilon)
-                k = cond * k + ~cond * (torch.round(torch.cuda.FloatTensor(k.shape).uniform_() * n)) # [0, n]
-            else:
-                cond = (torch.FloatTensor(k.shape).uniform_()).ge(self.exploration_epsilon)
-                k = cond * k + ~cond * (torch.round(torch.FloatTensor(k.shape).uniform_() * n))  # [0, n]
-
-            log_pk = m.log_prob(k.detach())
-            k = (k / n).detach()
+        log_pk = m.log_prob(k.detach())
+        k = (k / n).detach()
 
         return k, log_pk
 
@@ -348,78 +213,17 @@ class Net(nn.Module):
         x = torch.pow(- num / den, (-1. / a))
         return x
 
-    '''
-        returns the log probability of a sample
-    '''
-    def bounded_Pareto_prob(self, x, a, l, h):
-        num = a * torch.pow(l, a) * torch.pow(x, (-a-1))
-        den = 1 - torch.pow((l/h), a)
-        p = num/den
-        return p
 
-    '''
-        mu    [B, H, W] [0, 1]
-        alpha [B, H, W] [0.01, 2.0]
-        l     [B, H, W] [0, n]
-        h     [B, H, W] [l, n]
-        
-        k_compression [B, H, W] [0, 1]
-    '''
-    def sample_compression(self, mu, alpha, l, h):
+    def sample_compression(self, mu):
 
-        if self.adaptive_compression_sampling:
+        delta = mu * self.pareto_interval
 
-            if self.compression_sampling_function == 0:  # linear
+        l = torch.clamp(torch.ceil((mu - delta)*self.n), 1.0, float(self.n-3.0))
+        h = torch.clamp(torch.ceil((mu + delta)*self.n), 4.0, float(self.n))
+        alpha = self.pareto_alpha
+        k_compression = torch.clamp(self.sample_bounded_Pareto(mu.shape, alpha, l, h), 0, self.n) / self.n
 
-                if self.cuda_backend:
-                    u = torch.cuda.FloatTensor(mu.shape).uniform_()
-                else:
-                    u = torch.FloatTensor(mu.shape).uniform_()
-                k_compression = (u * (h - l) + l).detach()
-                log_p_compression = torch.log(1./(h-l))
-                k_compression = (k_compression / self.n).detach()
-
-            elif self.compression_sampling_function == 1:  # exponential
-
-                m = Exponential(alpha)
-                k_compression = torch.clamp(m.sample() + l, 0, self.n)
-                log_p_compression = torch.log(alpha * torch.exp(-alpha*k_compression) + l)
-                k_compression = (k_compression / self.n).detach()
-
-            elif self.compression_sampling_function == 2:  # bounded pareto
-
-                k_compression = (torch.clamp(self.sample_bounded_Pareto(mu.shape, alpha, l, h), 0, self.n)).detach()
-                log_p_compression = torch.log(self.bounded_Pareto_prob(k_compression, alpha, l, h))
-                k_compression = (k_compression / self.n).detach()
-
-        else:
-
-            log_p_compression = None
-
-            if self.compression_sampling_function == 0:  # linear
-
-                if self.cuda_backend:
-                    k_compression_limit = torch.cuda.FloatTensor(mu.shape).uniform_() * torch.clamp(mu*self.n + 2., 0, self.n)
-                else:
-                    k_compression_limit = torch.FloatTensor(mu.shape).uniform_() * torch.clamp(mu*self.n + 2., 0, self.n)
-                k_compression = k_compression_limit / self.n
-
-            elif self.compression_sampling_function == 1:  # linear
-
-                alpha = -np.log(0.5)/(mu * self.n)
-                m = Exponential(alpha)
-                k_compression = torch.clamp(m.sample()+1, 0, self.n) / self.n
-
-            elif self.compression_sampling_function == 2:  # linear
-
-                delta = mu * self.pareto_interval
-
-                l = torch.clamp(torch.ceil((mu - delta)*self.n), 1.0, float(self.n-3.0))
-                h = torch.clamp(torch.ceil((mu + delta)*self.n), 4.0, float(self.n))
-                alpha = self.pareto_alpha #1.16
-                k_compression = torch.clamp(self.sample_bounded_Pareto(mu.shape, alpha, l, h), 0, self.n) / self.n
-
-        return k_compression, log_p_compression
+        return k_compression
 
     '''
         z_tilde = soft quantization
@@ -455,17 +259,16 @@ class Net(nn.Module):
     def forward(self, x, training=True):
 
         # encode
-        z, mu, alpha, l, h, a = self.E(x)
+        z, mu = self.E(x)
 
         # compute k for learning optimal mu and k_compress to push information
         if training:
             k, log_pk = self.sample_k(mu)
-            k_compression, log_p_compression = self.sample_compression(mu, alpha, l, h)
+            k_compression = self.sample_compression(mu)
         else:
             k = mu
             k_compression = mu
             log_pk = None
-            log_p_compression = None
 
         # quantize
         z = self.quantize(z)
@@ -478,7 +281,7 @@ class Net(nn.Module):
         x_hat_k = self.D(z_k)
         x_hat_compress = self.D(z_compress)
 
-        return x_hat_compress, x_hat_k, log_pk, log_p_compression, k, k_compression, mu, a, z
+        return x_hat_compress, x_hat_k, log_pk, k, k_compression, mu, z
 
     '''
         returns the reconstruction loss and img_err to compute the reward
@@ -486,7 +289,6 @@ class Net(nn.Module):
     def get_loss_d(self, x, x_hat_compress, x_hat_k):
 
         img_err_k = torch.abs(x - x_hat_k)
-        img_err_c = torch.abs(x - x_hat_compress)
 
         msssim_compress = self.msssim_c(x, x_hat_compress)  # [0, 1] 0: bad, 1: good
         msssim_k = self.msssim_k(x, x_hat_k)
@@ -500,55 +302,41 @@ class Net(nn.Module):
             loss_distortion = torch.mean(torch.abs(x - x_hat_compress), (1, 2, 3))
 
         accuracy_k = 100 * msssim_k
-        accuracy_c = 100 * msssim_compress
 
         accuracy_compression_mean = msssim_mean_compress
         accuracy_k_mean = msssim_mean_k
 
         loss = torch.mean(loss_distortion)
 
-        return loss, accuracy_k, accuracy_c, accuracy_compression_mean, accuracy_k_mean, img_err_k, img_err_c
+        return loss, accuracy_k, accuracy_compression_mean, accuracy_k_mean, img_err_k
 
     '''
         Reward computation and policy gradient loss
     '''
-    def get_loss_k(self, x, img_err_k, img_err_c, accuracy_k, accuracy_c, k, k_compression, log_pk, log_p_compression, a, L2_a):
+    def get_loss_k(self, x, img_err_k, accuracy_k, k, log_pk):
 
         # compute positive reward for the two reconstructed images
         kernel = self.kernel
         R_k = F.conv2d(img_err_k, kernel, bias=None, stride=8, padding=0, dilation=1, groups=1).detach()
         R_k = torch.squeeze(1. - R_k/(self.colors*kernel.shape[-2]*kernel.shape[-1]))
-        R_c = F.conv2d(img_err_c, kernel, bias=None, stride=8, padding=0, dilation=1, groups=1).detach()
-        R_c = torch.squeeze(1. - R_c / (self.colors * kernel.shape[-2] * kernel.shape[-1]))
 
         # cond = 0 if above threshold else 1, repeat to same dimentions of mu
         cond_k = accuracy_k.le(self.min_accuracy)
-        cond_c = accuracy_c.le(self.min_accuracy)
         avg_cond = torch.mean(cond_k.float())
         cond_k = torch.unsqueeze(torch.unsqueeze(cond_k, -1), -1).repeat(1, R_k.shape[1], R_k.shape[2])
-        cond_c = torch.unsqueeze(torch.unsqueeze(cond_c, -1), -1).repeat(1, R_k.shape[1], R_k.shape[2])
-
-        # regularization (is set to 0 now)
-        loss_a = L2_a * torch.sum(torch.pow(a, 2), (1, 2, 3))
 
         # reward for k, if cond = 1 -> R = accuracy else R = -k
         R_k = (cond_k * R_k + ~cond_k * -k).detach()
         loss_pk = torch.sum(- R_k * log_pk, (1, 2)) # policy gradient
 
-        # same idea for compression if it is adaptive
-        if self.adaptive_compression_sampling:
-            R_compression = (cond_c * R_c + ~cond_c * -k_compression).detach()
-            loss_p_compression = torch.sum(- R_compression * log_p_compression, (1, 2))
-            loss = torch.mean(loss_pk + loss_p_compression + loss_a)
-        else:
-            loss = torch.mean(loss_pk + loss_a)
+        loss = torch.mean(loss_pk)
 
         return loss, avg_cond, R_k
 
     # compute accuracy on testing set, output image not continuous but within [0, 255]
     def get_accuracy(self, x):
 
-        _, x_hat, _, _, _, _, mu, _, z = self.forward(x, False)
+        _, x_hat, _, _, _, mu, z = self.forward(x, False)
 
         if self.cuda_backend:
             x_uint8 = ((x * 255).type(torch.cuda.IntTensor)).type(torch.cuda.FloatTensor)
@@ -565,7 +353,7 @@ class Net(nn.Module):
     '''
     def get_information_content(self, x):
 
-        z, mu, _, _, _, _ = self.E(x)
+        z, mu = self.E(x)
         z = self.quantize(z)
 
         acc_channels = np.zeros(self.n)
