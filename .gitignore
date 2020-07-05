@@ -2,3 +2,5 @@
 .DS_Store/
 env/
 Kodak/
+transformer/runs
+transformer/__pycache__
