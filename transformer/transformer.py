@@ -1,9 +1,9 @@
-import os
 from tqdm import tqdm
 
 import torch
 import numpy as np
 import torch.nn as nn
+import matplotlib.pyplot as plt
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -13,6 +13,7 @@ from torchvision import datasets, transforms
 import torch.optim as optim
 
 import transformer_utils as utils
+from network import Net
 
 
 class CompressionTransformer(nn.Module):
@@ -26,6 +27,7 @@ class CompressionTransformer(nn.Module):
                  num_dec_layers=3,
                  z_centroids=None,
                  mse_method=False,
+                 num_centroids=8
                  ):
         super().__init__()
 
@@ -113,21 +115,30 @@ class CompressionTransformer(nn.Module):
                 nn.init.xavier_uniform_(p)
 
 
-def transformer_loss(z, z_tilde_logits):
+def transformer_loss(z, z_logits, z_centroids):
     """
     z               ~ B x D x H x W, quantized with z_centroids and masked
     z_tilde_logits  ~ B x L x D x H x W, L is the number of centroids
     z_centroids     ~ L, symbol centroids for z
     """
 
-    # z_reconstructed = z_centroids[z_tilde_logits.argmax(dim=1)]  # if other centroids than 0, 1, .. L-1
-    z_rec = z_tilde_logits.argmax(dim=1)
+    z_mask = ~(z.abs() > 0)
 
-    equal = (z == z_rec)
-    accuracy = equal.sum(dtype=torch.float) / z.shape.numel()
-    loss = F.cross_entropy(z_tilde_logits, z.to(int))
+    z_target = (z.unsqueeze(0) - z_centroids.view(-1, 1, 1, 1, 1)).abs().argmin(dim=0)  # map z to centroid index
+    z_target[z_mask] = -1  # set the masked elements to -1 and ignore that in the loss calculation
+    loss = F.cross_entropy(z_logits, z_target, ignore_index=-1)
 
-    return loss, accuracy
+    # If symbols are [0, 1, ..., L-1]
+    # z_rec = z_tilde_logits.argmax(dim=1)
+    # z_target = z.to(int)
+    # loss = F.cross_entropy(z_logits, z_target)
+
+    # If accuracy is calc. in here too..
+    # z_rec = z_centroids[z_logits.argmax(dim=1)]
+    # equal = (z == z_rec)
+    # accuracy = equal.sum(dtype=torch.float) / z.shape.numel()
+
+    return loss  #, accuracy
 
 
 def mse_loss(z, z_tilde, z_centroids):
@@ -169,6 +180,8 @@ class PositionEmbedding2D(nn.Module):
 
 def train(model, optimizer, writer, z, z_centroids, EPOCHS):
 
+    mask = (z == 0)
+
     for epoch in tqdm(range(EPOCHS)):
 
         output = model(z)
@@ -200,9 +213,12 @@ def train(model, optimizer, writer, z, z_centroids, EPOCHS):
         if model.mse_method:
             loss, accuracy = mse_loss(z, z_reals, z_centroids)
         else:
-            loss, accuracy = transformer_loss(z, z_logits)
+            loss = transformer_loss(z, z_logits, z_centroids)
 
-        if epoch % 100 == 0:
+        # only look at the unmasked positions in z to calc. accuracy
+        accuracy = (z == z_rec).sum(dtype=torch.float) / (mask.shape.numel() - mask.sum())
+
+        if epoch % 50 == 0:
             print(f'\nLoss: {loss.item():10.2f}\nAccuracy: {accuracy.item():6.3f}')
             # print(f'Range of c: [{c.detach().min():.3f}, {c.detach().max():.3f}]')
             if model.mse_method:
@@ -230,42 +246,56 @@ def main():
 
     torch.manual_seed(1234)
 
-    d_ff = 128
-    nhead = 4
-    dropout = 0.1
-    num_enc_layers = num_dec_layers = 1
+    transform = transforms.Compose([transforms.Resize(168),
+                                    transforms.CenterCrop(168),
+                                    transforms.ToTensor()])
 
-    EPOCHS = 50000
+    dataset = datasets.ImageFolder(root='../Kodak/', transform=transform)
+    loader = DataLoader(dataset=dataset, batch_size=4, shuffle=False)
 
-    b = 32
-    h = w = 3
-    d = 4
-    L = 2
+    # take first 4 images
+    img, _ = next(iter(loader))
 
-    # transform = transforms.Compose([transforms.Resize(168),
-    #                                 transforms.ToTensor()])
-    #
-    # dataset = datasets.ImageFolder(root="../Kodak/", transform=transform)
-    # loader = DataLoader(dataset=dataset, batch_size=4, shuffle=False)
+    L = 8
+    n = 64
+    colors = 3
+    model_depth = 3
+    model_size = 64
+    min_accuracy = 97.0
+    pareto_alpha = 1.16
+    pareto_interval = 0.5
+    cuda_backend = torch.cuda.is_available()
+    device = torch.device("cuda:0" if cuda_backend else "cpu")
 
+    net = Net(min_accuracy, colors, model_depth, model_size, n, L, cuda_backend, pareto_interval, pareto_alpha)
+    net.load_state_dict(torch.load('../models/accuracy_97.597206.pt', map_location=device), strict=False)
 
-    z_centroids = torch.arange(L).to(torch.float)
+    out = net(img)
+    z = out[-1].detach()
+    z_centroids = net.c.detach()
 
-    # z = torch.randint(L, size=(1, d, h, w)).to(torch.float)
-    # z = z.repeat(b, 1, 1, 1)
-
-    z = torch.zeros(2, 4, 3, 3)
-    z[1] = 1
+    # z, z_centroids = get_fake_z()
 
     print(f'symbol dist: {z.unique(return_counts=True)[1]}')  # [160, 128, 128,  96, 192,  96, 192, 160]
 
-    model = CompressionTransformer(d, nhead, d_ff, dropout, num_enc_layers,
+    # d_ff = 128
+    # nhead = 4
+    # num_enc_layers = num_dec_layers = 1
+
+    nhead = 4
+    d_ff = 2048  # 4096 works even better, at least for overfitting (:
+    dropout = 0.0
+    num_layers = 6
+
+    num_enc_layers = num_dec_layers = num_layers
+    model = CompressionTransformer(model_size, nhead, d_ff, dropout, num_enc_layers,
                                    num_dec_layers, z_centroids, mse_method=False)
+
     optimizer = optim.AdamW(model.parameters(), lr=0.0003)
     model.train()
-    model_name = f'idx_nhead_{nhead}_dff_{d_ff}_encdeclayers_{num_enc_layers}_bs'
+    model_name = f'nhead_{nhead}_dff_{d_ff}_encdeclayers_{num_enc_layers}_Kodak_first_4'
     writer = SummaryWriter('./runs/' + model_name)
-    train(model, optimizer, writer, z, z_centroids, EPOCHS)
+    train(model, optimizer, writer, z, z_centroids, EPOCHS=5000)
 
 
 if __name__ == '__main__':

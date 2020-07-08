@@ -281,7 +281,7 @@ class Net(nn.Module):
         x_hat_k = self.D(z_k)
         x_hat_compress = self.D(z_compress)
 
-        return x_hat_compress, x_hat_k, log_pk, k, k_compression, mu, z
+        return x_hat_compress, x_hat_k, log_pk, k, k_compression, mu, z_k
 
     '''
         returns the reconstruction loss and img_err to compute the reward
