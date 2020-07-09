@@ -46,6 +46,10 @@ class CompressionTransformer(nn.Module):
         self.z_centroids = z_centroids
         self.arange = torch.arange(len(z_centroids), dtype=torch.float)
 
+        # Symbol centroids
+        initial_centroids = torch.linspace(-4., 4., num_centroids)
+        self.c_centroids = torch.nn.Parameter(initial_centroids)  # centroids for symbols in c
+
         self._init_parameters()
 
     def forward(self, z):
@@ -53,6 +57,7 @@ class CompressionTransformer(nn.Module):
         self.z_shape = z.shape  # ~ B x D x H x W
 
         c = self.encode(z)   # c ~ HW x B x D
+        c = self.quantize(c)
 
         if self.mse_method:
             z_reals, z_logits = self.decode(c)
@@ -104,6 +109,14 @@ class CompressionTransformer(nn.Module):
             # Maps from B x 1 x D x H x W --> B x L x D x H x W
             z_logits = 1 - (self.arange.view(1, -1, 1, 1, 1) - z_reals.unsqueeze(1)).abs()  # alfredos tricks
             return z_reals, z_logits
+
+    def quantize(self, c):
+        norm = (torch.abs(c.unsqueeze(-1) - self.c_centroids)) ** 2
+        c_tilde = (F.softmax(-1.0 * norm, dim=-1) * self.c_centroids).sum(-1)
+        c_hat = (F.softmax(-1e7 * norm, dim=-1) * self.c_centroids).sum(-1)
+        c_quantized = (c_hat - c_tilde).detach() + c_tilde  # differentiability trick
+
+        return c_quantized
 
     def _init_parameters(self):
         """
@@ -224,12 +237,14 @@ def train(model, optimizer, writer, z, z_centroids, EPOCHS):
             if model.mse_method:
                 print(f'Range of z_reals: [{z_reals.detach().min():.3f}, {z_reals.detach().max()}]')
             else:
-                print(f'z uniques: ', z_rec.unique())
+                print('z uniques: ', z_rec.unique())
+                print('c uniques: ', c.detach().unique())
 
         if model.mse_method:
             writer.add_scalar('mse_loss', loss.item(), epoch)
         else:
             writer.add_scalar('loss', loss.item(), epoch)
+            writer.add_histogram('c_hist', c.detach().flatten(0), epoch)
             writer.add_histogram('z_reals_hist', z_reals.detach().flatten(0), epoch)
 
         writer.add_scalar('accuracy', accuracy.item(), epoch)
@@ -293,7 +308,7 @@ def main():
 
     optimizer = optim.AdamW(model.parameters(), lr=0.0003)
     model.train()
-    model_name = f'nhead_{nhead}_dff_{d_ff}_encdeclayers_{num_enc_layers}_Kodak_first_4'
+    model_name = f'quantized_nhead_{nhead}_dff_{d_ff}_encdeclayers_{num_enc_layers}_Kodak_first_4'
     writer = SummaryWriter('./runs/' + model_name)
     train(model, optimizer, writer, z, z_centroids, EPOCHS=5000)
 
