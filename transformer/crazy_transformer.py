@@ -79,6 +79,8 @@ class CompressionTransformer(nn.Module):
         return output
 
     def sample_k(self, mu):
+        # Poisson sampling
+
         # mu ~ B
         b, d, h, w = self.z_shape
         n = float(d * h * w)
@@ -90,6 +92,13 @@ class CompressionTransformer(nn.Module):
         k = (k / n).detach()
 
         return k, log_pk
+
+    def sample_compression(self, mu):
+        # Pareto sampling
+
+        # mu ~ B
+        b, d, h, w = self.z_shape
+        n = float(d * h * w)
 
     def encode(self, z, padding_mask=None):
         # z  ~ B x D x H x W
@@ -226,7 +235,7 @@ class MuEncoderLayer(nn.Module):
         self.linear2 = nn.Linear(dim_feedforward, d_model + 1)  # an extra channel for computing mu
 
         self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model + 1)
+        self.norm2 = nn.LayerNorm(d_model + 1)  # an extra channel for computing mu
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
@@ -239,8 +248,8 @@ class MuEncoderLayer(nn.Module):
         src2 = self.linear2(self.dropout(F.relu(self.linear1(src))))  # Feedforward
         src = self._pad(src) + self.dropout2(src2)  # skip connection
 
-        # src = self.norm2(src)
         # todo: this layer norm potentially mess up by forcing c values to be small
+        src = self.norm2(src)
 
         out = src[:, :, :-1]  # ~ HW x B x D
         mu = src[:, :, -1].mean(dim=0).sigmoid()  # HW x B take mean over HW --> B

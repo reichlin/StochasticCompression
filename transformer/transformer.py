@@ -37,7 +37,9 @@ class CompressionTransformer(nn.Module):
         self.position_embedding = PositionEmbedding2D(d_model)
 
         encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, d_ff, dropout)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_enc_layers)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_enc_layers - 1)
+        self.mu_encoder = MuEncoderLayer(d_model, nhead, d_ff, dropout)
+
         decoder_layer = nn.TransformerDecoderLayer(d_model, nhead, d_ff, dropout)
         self.decoder = nn.TransformerDecoder(decoder_layer, num_dec_layers)
 
@@ -56,21 +58,17 @@ class CompressionTransformer(nn.Module):
         # Encode z to c, then decode to z_tilde which is
         self.z_shape = z.shape  # ~ B x D x H x W
 
-        c = self.encode(z)   # c ~ HW x B x D
+        c, mu = self.encode(z)   # c ~ HW x B x D, mu ~ B
+
         c = self.quantize(c)
 
-        if self.mse_method:
-            z_reals, z_logits = self.decode(c)
-            z_idx = (self.z_centroids.view(-1, 1, 1, 1, 1) - z_reals.unsqueeze(0)).abs().argmin(dim=0)  # find closest index
-            z_rec = self.z_centroids[z_idx].detach()
-
-        else:
-            z_reals, z_logits = self.decode(c)
-            z_rec = self.z_centroids[z_logits.argmax(dim=1)].detach()  # mask the same way z is masked
+        z_real, z_logits = self.decode(c)
+        z_rec = self.z_centroids[z_logits.argmax(dim=1)].detach()  # mask the same way z is masked
 
         output = {'c': c,
+                  'mu': mu,
                   'z_rec': z_rec,
-                  'z_reals': z_reals,
+                  'z_real': z_real,
                   'z_logits': z_logits,
                   }
 
@@ -85,8 +83,9 @@ class CompressionTransformer(nn.Module):
         z = utils.flatten_tensor_batch(z)  # to transformer format --> HW x B x D
 
         c = self.encoder(z)
+        c, mu = self.mu_encoder(c)
 
-        return c
+        return c, mu
 
     def decode(self, c):
 
@@ -98,17 +97,14 @@ class CompressionTransformer(nn.Module):
 
         tgt_mask = utils.generate_subsequent_mask(seq_len=int(h * w))  # generate z_tilde autoregressively
 
-        z_reals = self.decoder(tgt, c, tgt_mask)
-        z_reals = utils.unravel_tensor_batch(z_reals, self.z_shape)  # HW x B x D --> B x D x H x W
-        z_reals = z_reals.sigmoid() * (len(self.z_centroids) - 1)  # squash to range [0, L]
-        # todo: this would be pushed into range of z centroids
+        z_real = self.decoder(tgt, c, tgt_mask)
+        z_real = utils.unravel_tensor_batch(z_real, self.z_shape)  # HW x B x D --> B x D x H x W
+        z_real = z_real.sigmoid() * (len(self.z_centroids) - 1)  # squash to range [0, L-1]
 
-        if self.mse_method:
-            return z_reals, None
-        else:
-            # Maps from B x 1 x D x H x W --> B x L x D x H x W
-            z_logits = 1 - (self.arange.view(1, -1, 1, 1, 1) - z_reals.unsqueeze(1)).abs()  # alfredos tricks
-            return z_reals, z_logits
+        # Maps from B x 1 x D x H x W --> B x L x D x H x W
+        z_logits = 1 - (self.arange.view(1, -1, 1, 1, 1) - z_real.unsqueeze(1)).abs()
+
+        return z_real, z_logits
 
     def quantize(self, c):
         norm = (torch.abs(c.unsqueeze(-1) - self.c_centroids)) ** 2
@@ -126,6 +122,75 @@ class CompressionTransformer(nn.Module):
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
+
+
+class MuEncoderLayer(nn.Module):
+
+    def __init__(self, d_model, nhead, dim_feedforward, dropout):
+        super().__init__()
+        self.attention = nn.MultiheadAttention(d_model, nhead, dropout)
+
+        # Feedforward
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model + 1)  # an extra channel for computing mu
+
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model + 1)  # an extra channel for computing mu
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+
+        src2 = self.attention(src, src, src, attn_mask=src_mask,
+                              key_padding_mask=src_key_padding_mask)[0]
+        src = src + self.dropout1(src2)  # skip connection
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(F.relu(self.linear1(src))))  # Feedforward
+        src = self._pad(src) + self.dropout2(src2)  # skip connection
+
+        # todo: this layer norm potentially mess up by forcing c values to be small
+        src = self.norm2(src)
+
+        out = src[:, :, :-1]  # ~ HW x B x D
+        mu = src[:, :, -1].mean(dim=0).sigmoid()  # HW x B take mean over HW --> B
+
+        return out, mu
+
+    def _pad(self, x):
+        """
+        Pad x with zeros in the channel dimension to allow for skip connection
+        """
+        hw, b, d = x.shape
+        return torch.cat((x, torch.zeros(hw, b, 1)), dim=2)
+
+
+class PositionEmbedding2D(nn.Module):
+    """
+    Applies 2D positional embedding
+    """
+
+    def __init__(self, d_model, max_h=200, max_w=200):
+        super().__init__()
+
+        assert d_model % 4 == 0
+
+        x_embed = torch.arange(0, max_w).repeat(1, max_h, 1)
+        y_embed = torch.arange(0, max_h).repeat(1, max_w, 1).permute(0, 2, 1)
+        dim_t = torch.arange(d_model // 2, dtype=torch.float32)
+        dim_t = 10000 ** (2 * (dim_t // 2) / d_model // 2)
+        pos_x = x_embed.unsqueeze(dim=3) / dim_t  # same as x_embed[:, :, :, None] / dim_t
+        pos_y = y_embed.unsqueeze(dim=3) / dim_t
+        pos_x = torch.stack((pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4).flatten(3)
+        pos_y = torch.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
+        self.pos_embedding = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
+
+    def forward(self, src):
+        b, _, h, w = src.shape
+        # Slice the position embedding with the size of the src "image"
+        pos_embedding = self.pos_embedding[:, :, :h, :w]
+
+        return src + pos_embedding
 
 
 def transformer_loss(z, z_logits, z_centroids):
@@ -163,34 +228,6 @@ def mse_loss(z, z_tilde, z_centroids):
     return loss, accuracy
 
 
-class PositionEmbedding2D(nn.Module):
-    """
-    Applies 2D positional embedding
-    """
-
-    def __init__(self, d_model, max_h=200, max_w=200):
-        super().__init__()
-
-        assert d_model % 4 == 0
-
-        x_embed = torch.arange(0, max_w).repeat(1, max_h, 1)
-        y_embed = torch.arange(0, max_h).repeat(1, max_w, 1).permute(0, 2, 1)
-        dim_t = torch.arange(d_model // 2, dtype=torch.float32)
-        dim_t = 10000 ** (2 * (dim_t // 2) / d_model // 2)
-        pos_x = x_embed.unsqueeze(dim=3) / dim_t  # same as x_embed[:, :, :, None] / dim_t
-        pos_y = y_embed.unsqueeze(dim=3) / dim_t
-        pos_x = torch.stack((pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4).flatten(3)
-        pos_y = torch.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
-        self.pos_embedding = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
-
-    def forward(self, src):
-        b, _, h, w = src.shape
-        # Slice the position embedding with the size of the src "image"
-        pos_embedding = self.pos_embedding[:, :, :h, :w]
-
-        return src + pos_embedding
-
-
 def train(model, optimizer, writer, z, z_centroids, EPOCHS):
 
     mask = (z == 0)
@@ -201,7 +238,7 @@ def train(model, optimizer, writer, z, z_centroids, EPOCHS):
 
         c = output['c']
         z_rec = output['z_rec']
-        z_reals = output['z_reals']
+        z_real = output['z_real']
         z_logits = output['z_logits']
 
         # if epoch % 100 == 0:
@@ -224,7 +261,7 @@ def train(model, optimizer, writer, z, z_centroids, EPOCHS):
             print()
 
         if model.mse_method:
-            loss, accuracy = mse_loss(z, z_reals, z_centroids)
+            loss, accuracy = mse_loss(z, z_real, z_centroids)
         else:
             loss = transformer_loss(z, z_logits, z_centroids)
 
@@ -235,7 +272,7 @@ def train(model, optimizer, writer, z, z_centroids, EPOCHS):
             print(f'\nLoss: {loss.item():10.2f}\nAccuracy: {accuracy.item():6.3f}')
             # print(f'Range of c: [{c.detach().min():.3f}, {c.detach().max():.3f}]')
             if model.mse_method:
-                print(f'Range of z_reals: [{z_reals.detach().min():.3f}, {z_reals.detach().max()}]')
+                print(f'Range of z_reals: [{z_real.detach().min():.3f}, {z_real.detach().max()}]')
             else:
                 print('z uniques: ', z_rec.unique())
                 print('c uniques: ', c.detach().unique())
@@ -245,7 +282,7 @@ def train(model, optimizer, writer, z, z_centroids, EPOCHS):
         else:
             writer.add_scalar('loss', loss.item(), epoch)
             writer.add_histogram('c_hist', c.detach().flatten(0), epoch)
-            writer.add_histogram('z_reals_hist', z_reals.detach().flatten(0), epoch)
+            writer.add_histogram('z_reals_hist', z_real.detach().flatten(0), epoch)
 
         writer.add_scalar('accuracy', accuracy.item(), epoch)
 
@@ -308,7 +345,7 @@ def main():
 
     optimizer = optim.AdamW(model.parameters(), lr=0.0003)
     model.train()
-    model_name = f'quantized_nhead_{nhead}_dff_{d_ff}_encdeclayers_{num_enc_layers}_Kodak_first_4'
+    model_name = f'mu_encoder_nhead_{nhead}_dff_{d_ff}_encdeclayers_{num_enc_layers}_Kodak_first_4'
     writer = SummaryWriter('./runs/' + model_name)
     train(model, optimizer, writer, z, z_centroids, EPOCHS=5000)
 
