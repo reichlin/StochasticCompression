@@ -23,15 +23,14 @@ class CompressionTransformer(nn.Module):
                  nhead=4,
                  d_ff=256,
                  dropout=0.1,
+                 num_centroids=8,
                  num_enc_layers=3,
                  num_dec_layers=3,
                  z_centroids=None,
-                 mse_method=False,
-                 num_centroids=8
+                 pareto_alpha=1.16,
+                 pareto_interval=0.3
                  ):
         super().__init__()
-
-        self.mse_method = mse_method
 
         self.d_model = d_model
         self.position_embedding = PositionEmbedding2D(d_model)
@@ -52,24 +51,48 @@ class CompressionTransformer(nn.Module):
         initial_centroids = torch.linspace(-4., 4., num_centroids)
         self.c_centroids = torch.nn.Parameter(initial_centroids)  # centroids for symbols in c
 
+        # Pareto constants
+        self.pareto_alpha = pareto_alpha
+        self.pareto_interval = pareto_interval
+
         self._init_parameters()
 
-    def forward(self, z):
-        # Encode z to c, then decode to z_tilde which is
+    def forward(self, z, training=True):
+        # Encode z to c, then decode to z_rec
         self.z_shape = z.shape  # ~ B x D x H x W
 
-        c, mu = self.encode(z)   # c ~ HW x B x D, mu ~ B
+        c, mewtwo = self.encode(z)   # c ~ HW x B x D, mu ~ B
+
+        # compute k for learning optimal mu and k_compress to push information
+        if training:
+            k, log_pk = self.sample_k(mewtwo)
+            k_compress = self.sample_compression(mewtwo)
+        else:
+            k, log_pk = mewtwo, None
+            k_compress = mewtwo
 
         c = self.quantize(c)
 
-        z_real, z_logits = self.decode(c)
-        z_rec = self.z_centroids[z_logits.argmax(dim=1)].detach()  # mask the same way z is masked
+        c_k, memory_mask_k = self.mask(c, k)
+        c_compress, memory_mask_compress = self.mask(c, k_compress)
 
-        output = {'c': c,
-                  'mu': mu,
-                  'z_rec': z_rec,
-                  'z_real': z_real,
-                  'z_logits': z_logits,
+        # z_real, z_logits = self.decode(c)
+        z_real_k, z_logits_k = self.decode(c_k)
+        z_real_compress, z_logits_compress = self.decode(c_compress)
+
+        # z_rec = self.z_centroids[z_logits.argmax(dim=1)].detach()  # mask the same way z is masked?
+        z_rec_k = self.z_centroids[z_logits_k.argmax(dim=1)].detach()  # mask the same way z is masked
+        z_rec_compress = self.z_centroids[z_logits_compress.argmax(dim=1)].detach()  # mask the same way z is masked
+
+        output = {'k': k,
+                  'k_compress': k_compress,
+                  'c_k': c_k,
+                  'log_pk': log_pk,
+                  'mewtwo': mewtwo,
+                  'z_rec_k': z_rec_k,
+                  'z_logits_k': z_logits_k,
+                  'z_rec_compress': z_rec_compress,
+                  'z_logits_compress': z_logits_compress
                   }
 
         return output
@@ -83,11 +106,11 @@ class CompressionTransformer(nn.Module):
         z = utils.flatten_tensor_batch(z)  # to transformer format --> HW x B x D
 
         c = self.encoder(z)
-        c, mu = self.mu_encoder(c)
+        c, mewtwo = self.mu_encoder(c)
 
-        return c, mu
+        return c, mewtwo
 
-    def decode(self, c):
+    def decode(self, c, memory_mask=None):
 
         b, d, h, w = self.z_shape
 
@@ -97,7 +120,7 @@ class CompressionTransformer(nn.Module):
 
         tgt_mask = utils.generate_subsequent_mask(seq_len=int(h * w))  # generate z_tilde autoregressively
 
-        z_real = self.decoder(tgt, c, tgt_mask)
+        z_real = self.decoder(tgt, c, tgt_mask, memory_key_padding_mask=memory_mask)
         z_real = utils.unravel_tensor_batch(z_real, self.z_shape)  # HW x B x D --> B x D x H x W
         z_real = z_real.sigmoid() * (len(self.z_centroids) - 1)  # squash to range [0, L-1]
 
@@ -113,6 +136,72 @@ class CompressionTransformer(nn.Module):
         c_quantized = (c_hat - c_tilde).detach() + c_tilde  # differentiability trick
 
         return c_quantized
+
+    def mask(self, c, k):
+        # c ~ HW x B x D
+        # k ~ B
+        # todo: Is detach() needed here? k is already detached in sample_k(mu)..
+
+        k = k.detach()
+
+        b, d, h, w = self.z_shape
+        mask_from_index = (k * (d * h * w)).to(int).unsqueeze(1)  # B x 1
+        mask = ~torch.arange(d * h * w).repeat(b, 1).ge(mask_from_index)  # B x DHW
+        mask = mask.view(b, h * w, d).permute(1, 0, 2)  # HW x B x D, reshaped to format of c
+        c_masked = c * mask
+
+        # mask for the transformer decoder to know which elements in the sequence that are masked
+        memory_mask = torch.arange(h * w).unsqueeze(0).ge(torch.ceil(mask_from_index / float(d)))  # B x HW
+        return c_masked, memory_mask
+
+    def sample_k(self, mu):
+        # Poisson sampling
+        # mu ~ B
+
+        b, d, h, w = self.z_shape
+        n = float(d * h * w)
+
+        m = torch.distributions.Poisson(mu * n)
+        k = torch.clamp(m.sample(), 0., n)
+
+        log_pk = m.log_prob(k.detach())
+        k = (k / n).detach()
+
+        return k, log_pk
+
+    def sample_compression(self, mu):
+        # Pareto sampling
+        # mu ~ B
+
+        b, d, h, w = self.z_shape
+        n = float(d * h * w)
+
+        delta = mu * self.pareto_interval
+
+        l = torch.clamp(torch.ceil((mu - delta) * n), 1.0, float(n - 3.0))
+        h = torch.clamp(torch.ceil((mu + delta) * n), 4.0, float(n))
+        alpha = self.pareto_alpha
+        k_compression = torch.clamp(self.sample_bounded_pareto(mu.shape, alpha, l, h), 0, n) / n
+
+        return k_compression
+
+    '''
+        a = alpha of the bounded pareto -> gives the steepness
+        l = lower bound
+        h = upper bound
+        returns a random sample form this distribution
+    '''
+    def sample_bounded_pareto(self, size, a, l, h):
+        # if self.cuda_backend:
+        #     u = torch.cuda.FloatTensor(size).uniform_()
+        # else:
+        #     u = torch.FloatTensor(size).uniform_()
+
+        u = torch.FloatTensor(size).uniform_()
+        num = (u * torch.pow(h, a) - u * torch.pow(l, a) - torch.pow(h, a))
+        den = (torch.pow(h, a) * torch.pow(l, a))
+        x = torch.pow(- num / den, (-1. / a))
+        return x
 
     def _init_parameters(self):
         """
@@ -193,53 +282,67 @@ class PositionEmbedding2D(nn.Module):
         return src + pos_embedding
 
 
-def transformer_loss(z, z_logits, z_centroids):
-    """
-    z               ~ B x D x H x W, quantized with z_centroids and masked
-    z_tilde_logits  ~ B x L x D x H x W, L is the number of centroids
-    z_centroids     ~ L, symbol centroids for z
-    """
+class TransformerLoss:
 
-    z_mask = ~(z.abs() > 0)
+    def __init__(self, z_centroids, threshold=0.98):
+        self.threshold = threshold
+        self.z_centroids = z_centroids
 
-    z_target = (z.unsqueeze(0) - z_centroids.view(-1, 1, 1, 1, 1)).abs().argmin(dim=0)  # map z to centroid index
-    z_target[z_mask] = -1  # set the masked elements to -1 and ignore that in the loss calculation
-    loss = F.cross_entropy(z_logits, z_target, ignore_index=-1)
+    def __call__(self, z, z_rec_compress, z_logits_compress, k_2, log_pk_2):
 
-    # If symbols are [0, 1, ..., L-1]
-    # z_rec = z_tilde_logits.argmax(dim=1)
-    # z_target = z.to(int)
-    # loss = F.cross_entropy(z_logits, z_target)
+        mask = (z == 0)
+        accuracy = (z == z_rec_compress).sum(dtype=torch.float) / (mask.shape.numel() - mask.sum())
+        policy_loss = (accuracy > self.threshold).detach()
 
-    # If accuracy is calc. in here too..
-    # z_rec = z_centroids[z_logits.argmax(dim=1)]
-    # equal = (z == z_rec)
-    # accuracy = equal.sum(dtype=torch.float) / z.shape.numel()
+        z_target = (z.unsqueeze(0) - self.z_centroids.view(-1, 1, 1, 1, 1)).abs().argmin(dim=0)
+        z_target[mask] = -1  # set the masked elements to -1 and ignore that in the loss calc.
+        loss_ce = F.cross_entropy(z_logits_compress, z_target, ignore_index=-1)
 
-    return loss  #, accuracy
+        loss_pg = policy_loss * (k_2 * log_pk_2).mean()
+
+        # gamma = 1.5
+        # loss = loss_ce + gamma * mewtwo.mean()
+        # policy_loss = False
+
+        return loss_ce, loss_pg, policy_loss
+
+    def old__call__(self, z, z_rec_k, z_logits_k, k_2, log_pk_2):
+
+        mask = (z == 0)
+        accuracy = (z == z_rec_k).sum(dtype=torch.float) / (mask.shape.numel() - mask.sum())
+        policy_loss = (accuracy > self.threshold).detach()
+
+        z_target = (z.unsqueeze(0) - self.z_centroids.view(-1, 1, 1, 1, 1)).abs().argmin(dim=0)
+        z_target[mask] = -1  # set the masked elements to -1 and ignore that in the loss calc.
+        loss_ce = F.cross_entropy(z_logits_k, z_target, ignore_index=-1)
+
+        loss_pg = policy_loss * (k_2 * log_pk_2).mean()
+
+        # gamma = 1.5
+        # loss = loss_ce + gamma * mewtwo.mean()
+        # policy_loss = False
+
+        return loss_ce, loss_pg, policy_loss
 
 
-def mse_loss(z, z_tilde, z_centroids):
-
-    z_reconstructed = (z_centroids.view(-1, 1, 1, 1, 1) - z_tilde.unsqueeze(0)).abs().argmin(dim=0)
-    accuracy = (z == z_reconstructed).sum(dtype=torch.float) / z.shape.numel()
-    loss = F.mse_loss(z_tilde, z)
-
-    return loss, accuracy
-
-
-def train(model, optimizer, writer, z, z_centroids, EPOCHS):
+def train(model, optimizer, writer, z, z_centroids, EPOCHS, gamma=0.1, threshold=0.9):
 
     mask = (z == 0)
+    transf_loss = TransformerLoss(z_centroids, threshold=threshold)
 
     for epoch in tqdm(range(EPOCHS)):
 
         output = model(z)
 
-        c = output['c']
-        z_rec = output['z_rec']
-        z_real = output['z_real']
-        z_logits = output['z_logits']
+        k = output['k']
+        k_compress = output['k_compress']
+        c_k = output['c_k']
+        log_pk = output['log_pk']
+        mewtwo = output['mewtwo']
+        z_rec_k = output['z_rec_k']
+        z_rec_compress = output['z_rec_compress']
+        z_logits_k = output['z_logits_k']
+        z_logits_compress = output['z_logits_compress']
 
         # if epoch % 100 == 0:
         #     B, C, H, W = z.shape
@@ -257,41 +360,52 @@ def train(model, optimizer, writer, z, z_centroids, EPOCHS):
         #     for l in range(8):
         #         writer.add_scalar('Acc_symbol_' + str(l), acc_symb[l], epoch / 100)
 
-        if epoch % 10000 == 0:
-            print()
+        # loss = transformer_loss(z, z_logits, z_centroids)
+        loss_ce, loss_pg, policy_loss = transf_loss(z, z_rec_compress, z_logits_compress, k, log_pk)
 
-        if model.mse_method:
-            loss, accuracy = mse_loss(z, z_real, z_centroids)
-        else:
-            loss = transformer_loss(z, z_logits, z_centroids)
+        loss = loss_ce + gamma * loss_pg
+
+        if policy_loss:
+            print(f'PG loss on epoch {epoch}!')
+
+        avg_num_symbols = (c_k != 0).sum(dtype=torch.float).detach() / c_k.shape[1]
 
         # only look at the unmasked positions in z to calc. accuracy
-        accuracy = (z == z_rec).sum(dtype=torch.float) / (mask.shape.numel() - mask.sum())
+        accuracy_k = (z == z_rec_k).sum(dtype=torch.float) / (mask.shape.numel() - mask.sum())
+        accuracy_compress = (z == z_rec_compress).sum(dtype=torch.float) / (mask.shape.numel() - mask.sum())
 
         if epoch % 50 == 0:
-            print(f'\nLoss: {loss.item():10.2f}\nAccuracy: {accuracy.item():6.3f}')
-            # print(f'Range of c: [{c.detach().min():.3f}, {c.detach().max():.3f}]')
-            if model.mse_method:
-                print(f'Range of z_reals: [{z_real.detach().min():.3f}, {z_real.detach().max()}]')
-            else:
-                print('z uniques: ', z_rec.unique())
-                print('c uniques: ', c.detach().unique())
+            print(f'\nLoss: {loss.item():.3f}')
+            print(f'\nLoss ce: {loss_ce.item():.3f}')
+            print(f'\nLoss pg: {loss_pg.item():.3f}')
+            print(f'Accuracy k: {accuracy_k.item():.3f}')
+            print(f'Accuracy compress: {accuracy_compress.item():.3f}')
+            print('z_k uniques: ', z_rec_k.unique())
+            print('z_compress uniques: ', z_rec_compress.unique())
+            print('c_k uniques: ', c_k.detach().unique())
+            print('c_compress uniques: ', c_k.detach().unique())
+            print('avg num symbols: ', avg_num_symbols)
 
-        if model.mse_method:
-            writer.add_scalar('mse_loss', loss.item(), epoch)
-        else:
+        if writer is not None:
+            writer.add_scalar('k mean', k.mean().item(), epoch)
+            writer.add_scalar('k_compress mean', k_compress.mean().item(), epoch)
+            writer.add_scalar('mewtwo mean', mewtwo.mean().item(), epoch)
             writer.add_scalar('loss', loss.item(), epoch)
-            writer.add_histogram('c_hist', c.detach().flatten(0), epoch)
-            writer.add_histogram('z_reals_hist', z_real.detach().flatten(0), epoch)
-
-        writer.add_scalar('accuracy', accuracy.item(), epoch)
+            writer.add_scalar('loss_ce', loss_ce.item(), epoch)
+            writer.add_scalar('loss_pg', loss_pg.item(), epoch)
+            writer.add_histogram('c_k', c_k.detach().flatten(0), epoch)
+            writer.add_scalar('accuracy_k', accuracy_k.item(), epoch)
+            writer.add_scalar('accuracy_compress', accuracy_compress.item(), epoch)
+            writer.add_scalar('policy_gradient_loss', int(policy_loss), epoch)
+            writer.add_scalar('avg_num_symbols', avg_num_symbols, epoch)
 
         optimizer.zero_grad()
         loss.backward(retain_graph=False)
         optimizer.step()
-        # scheduler.step()
 
     writer.close()
+
+    return model
 
 
 def main():
@@ -302,7 +416,9 @@ def main():
                                     transforms.CenterCrop(168),
                                     transforms.ToTensor()])
 
-    dataset = datasets.ImageFolder(root='../Kodak/', transform=transform)
+    path_to_testset = '../Kodak/'
+
+    dataset = datasets.ImageFolder(root=path_to_testset, transform=transform)
     loader = DataLoader(dataset=dataset, batch_size=4, shuffle=False)
 
     # take first 4 images
@@ -326,28 +442,29 @@ def main():
     z = out[-1].detach()
     z_centroids = net.c.detach()
 
-    # z, z_centroids = get_fake_z()
-
     print(f'symbol dist: {z.unique(return_counts=True)[1]}')  # [160, 128, 128,  96, 192,  96, 192, 160]
 
-    # d_ff = 128
-    # nhead = 4
-    # num_enc_layers = num_dec_layers = 1
 
     nhead = 4
     d_ff = 2048  # 4096 works even better, at least for overfitting (:
     dropout = 0.0
     num_layers = 6
-
+    num_centroids = 8
     num_enc_layers = num_dec_layers = num_layers
-    model = CompressionTransformer(model_size, nhead, d_ff, dropout, num_enc_layers,
-                                   num_dec_layers, z_centroids, mse_method=False)
+
+    model = CompressionTransformer(model_size, nhead, d_ff, dropout, num_centroids,
+                                   num_enc_layers, num_dec_layers, z_centroids)
 
     optimizer = optim.AdamW(model.parameters(), lr=0.0003)
     model.train()
-    model_name = f'mu_encoder_nhead_{nhead}_dff_{d_ff}_encdeclayers_{num_enc_layers}_Kodak_first_4'
+    model_name = f'pareto_mask_nhead_{nhead}_dff_{d_ff}_encdeclayers_{num_enc_layers}_Kodak_first_4'
     writer = SummaryWriter('./runs/' + model_name)
-    train(model, optimizer, writer, z, z_centroids, EPOCHS=5000)
+    # writer = None
+
+    model = train(model, optimizer, writer, z, z_centroids, EPOCHS=5000)
+
+    save_path = './models/' + model_name + '.pt'
+    torch.save(model.state_dict(), save_path)
 
 
 if __name__ == '__main__':
