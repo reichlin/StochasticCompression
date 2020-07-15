@@ -1,5 +1,6 @@
 from tqdm import tqdm
 
+import sys
 import torch
 import numpy as np
 import torch.nn as nn
@@ -76,9 +77,9 @@ class CompressionTransformer(nn.Module):
         c_k, memory_mask_k = self.mask(c, k)
         c_compress, memory_mask_compress = self.mask(c, k_compress)
 
-        # z_real, z_logits = self.decode(c)
-        z_real_k, z_logits_k = self.decode(c_k)
-        z_real_compress, z_logits_compress = self.decode(c_compress)
+        # z_logits = self.decode(c)
+        z_logits_k = self.decode(c_k, memory_mask_k)
+        z_logits_compress = self.decode(c_compress, memory_mask_compress)
 
         # z_rec = self.z_centroids[z_logits.argmax(dim=1)].detach()  # mask the same way z is masked?
         z_rec_k = self.z_centroids[z_logits_k.argmax(dim=1)].detach()  # mask the same way z is masked
@@ -127,7 +128,7 @@ class CompressionTransformer(nn.Module):
         # Maps from B x 1 x D x H x W --> B x L x D x H x W
         z_logits = 1 - (self.arange.view(1, -1, 1, 1, 1) - z_real.unsqueeze(1)).abs()
 
-        return z_real, z_logits
+        return z_logits
 
     def quantize(self, c):
         norm = (torch.abs(c.unsqueeze(-1) - self.c_centroids)) ** 2
@@ -284,11 +285,12 @@ class PositionEmbedding2D(nn.Module):
 
 class TransformerLoss:
 
-    def __init__(self, z_centroids, threshold=0.98):
+    def __init__(self, z_centroids, threshold=0.98, flip_sign=False):
         self.threshold = threshold
         self.z_centroids = z_centroids
+        self.flip_sign = flip_sign
 
-    def __call__(self, z, z_rec_compress, z_logits_compress, k_2, log_pk_2):
+    def __call__(self, z, z_rec_compress, z_logits_compress, k, log_pk):
 
         mask = (z == 0)
         accuracy = (z == z_rec_compress).sum(dtype=torch.float) / (mask.shape.numel() - mask.sum())
@@ -298,7 +300,10 @@ class TransformerLoss:
         z_target[mask] = -1  # set the masked elements to -1 and ignore that in the loss calc.
         loss_ce = F.cross_entropy(z_logits_compress, z_target, ignore_index=-1)
 
-        loss_pg = policy_loss * (k_2 * log_pk_2).mean()
+        loss_pg = policy_loss * (k * log_pk).mean()
+
+        if self.flip_sign:
+            loss_pg = -loss_pg
 
         # gamma = 1.5
         # loss = loss_ce + gamma * mewtwo.mean()
@@ -327,8 +332,10 @@ class TransformerLoss:
 
 def train(model, optimizer, writer, z, z_centroids, EPOCHS, gamma=0.1, threshold=0.9):
 
-    mask = (z == 0)
+    model.train()
     transf_loss = TransformerLoss(z_centroids, threshold=threshold)
+
+    mask = (z == 0)
 
     for epoch in tqdm(range(EPOCHS)):
 
@@ -368,6 +375,7 @@ def train(model, optimizer, writer, z, z_centroids, EPOCHS, gamma=0.1, threshold
         if policy_loss:
             print(f'PG loss on epoch {epoch}!')
 
+        avg_bpp = utils.bpp_transformer(mewtwo.mean().item())
         avg_num_symbols = (c_k != 0).sum(dtype=torch.float).detach() / c_k.shape[1]
 
         # only look at the unmasked positions in z to calc. accuracy
@@ -397,6 +405,7 @@ def train(model, optimizer, writer, z, z_centroids, EPOCHS, gamma=0.1, threshold
             writer.add_scalar('accuracy_k', accuracy_k.item(), epoch)
             writer.add_scalar('accuracy_compress', accuracy_compress.item(), epoch)
             writer.add_scalar('policy_gradient_loss', int(policy_loss), epoch)
+            writer.add_scalar('avg_bpp', avg_bpp, epoch)
             writer.add_scalar('avg_num_symbols', avg_num_symbols, epoch)
 
         optimizer.zero_grad()
@@ -410,19 +419,44 @@ def train(model, optimizer, writer, z, z_centroids, EPOCHS, gamma=0.1, threshold
 
 def main():
 
+    if len(sys.argv) == 1:
+        print('Local run!')
+        threshold = 0.6
+        gamma = 0.1
+        local = True
+    else:
+        print('Running script @' + sys.argv[1])
+        threshold = float(sys.argv[2])
+        gamma = float(sys.argv[3])
+        local = False
+
     torch.manual_seed(1234)
+    cuda_backend = torch.cuda.is_available()
+    device = torch.device("cuda:0" if cuda_backend else "cpu")
+
+    ############# Alfredo help me out :) #############
+
+    if local:
+        path_to_testset = '../Kodak/'
+        path_to_model = '../models/accuracy_97.597206.pt'
+        logdir = './runs/'
+    else:
+        path_to_testset = '/local_storage/datasets/KODAK'
+        path_to_model = '?'
+        logdir = '/Midgard/home/areichlin/compression/transformer/'
+
+    ##################################################
 
     transform = transforms.Compose([transforms.Resize(168),
                                     transforms.CenterCrop(168),
                                     transforms.ToTensor()])
-
-    path_to_testset = '../Kodak/'
 
     dataset = datasets.ImageFolder(root=path_to_testset, transform=transform)
     loader = DataLoader(dataset=dataset, batch_size=4, shuffle=False)
 
     # take first 4 images
     img, _ = next(iter(loader))
+    img = img.to(device)
 
     L = 8
     n = 64
@@ -432,39 +466,38 @@ def main():
     min_accuracy = 97.0
     pareto_alpha = 1.16
     pareto_interval = 0.5
-    cuda_backend = torch.cuda.is_available()
-    device = torch.device("cuda:0" if cuda_backend else "cpu")
 
     net = Net(min_accuracy, colors, model_depth, model_size, n, L, cuda_backend, pareto_interval, pareto_alpha)
-    net.load_state_dict(torch.load('../models/accuracy_97.597206.pt', map_location=device), strict=False)
+
+    net.load_state_dict(torch.load(path_to_model, map_location=device), strict=False)
 
     out = net(img)
     z = out[-1].detach()
     z_centroids = net.c.detach()
 
-    print(f'symbol dist: {z.unique(return_counts=True)[1]}')  # [160, 128, 128,  96, 192,  96, 192, 160]
-
-
     nhead = 4
-    d_ff = 2048  # 4096 works even better, at least for overfitting (:
+    d_ff = 2048
     dropout = 0.0
     num_layers = 6
     num_centroids = 8
     num_enc_layers = num_dec_layers = num_layers
 
     model = CompressionTransformer(model_size, nhead, d_ff, dropout, num_centroids,
-                                   num_enc_layers, num_dec_layers, z_centroids)
+                                   num_enc_layers, num_dec_layers, z_centroids).to(device)
 
     optimizer = optim.AdamW(model.parameters(), lr=0.0003)
-    model.train()
-    model_name = f'pareto_mask_nhead_{nhead}_dff_{d_ff}_encdeclayers_{num_enc_layers}_Kodak_first_4'
-    writer = SummaryWriter('./runs/' + model_name)
+
+    # model_name = f'pareto_mask_nhead_{nhead}_dff_{d_ff}_encdeclayers_{num_enc_layers}_Kodak_first_4'
+    model_name = f'pareto_gamma_{gamma}_threshold_{threshold}_4kodak'
+
+    writer = SummaryWriter(logdir + model_name)
     # writer = None
 
-    model = train(model, optimizer, writer, z, z_centroids, EPOCHS=5000)
+    model = train(model, optimizer, writer, z, z_centroids, EPOCHS=10000, gamma=gamma, threshold=threshold)
 
-    save_path = './models/' + model_name + '.pt'
-    torch.save(model.state_dict(), save_path)
+    if local:
+        save_path = './models/' + model_name + '.pt'
+        torch.save(model.state_dict(), save_path)
 
 
 if __name__ == '__main__':

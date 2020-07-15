@@ -8,4 +8,4 @@
 source "/Midgard/home/areichlin/miniconda3/etc/profile.d/conda.sh"
 conda activate env_torch
 
-python /Midgard/home/areichlin/compression/transformer/transformer.py ${SLURMD_NODENAME}
+python /Midgard/home/areichlin/compression/transformer/transformer.py ${SLURMD_NODENAME} ${THRESHOLD} ${GAMMA}

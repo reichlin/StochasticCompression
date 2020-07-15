@@ -1,5 +1,11 @@
 import torch
+import numpy as np
 import matplotlib.pyplot as plt
+
+
+def bpp_transformer(mu_mean, symbols=8, zh=21, zw=21, zc=64, h=168, w=168):
+    """ Defaults are for Kodak testset """
+    return np.log2(symbols) * mu_mean * zh * zw * zc / (h * w)
 
 
 def generate_subsequent_mask(seq_len):
