@@ -8,24 +8,24 @@ def bpp_transformer(mu_mean, symbols=8, zh=21, zw=21, zc=64, h=168, w=168):
     return np.log2(symbols) * mu_mean * zh * zw * zc / (h * w)
 
 
-def generate_subsequent_mask(seq_len):
+def generate_subsequent_mask(seq_len, device):
     """
     Generate an autoregressive mask for the sequence. The masked positions are filled with float('-inf')
     and unmasked positions with float(0.0).
     """
-    mask = (torch.triu(torch.ones(seq_len, seq_len)) == 1).transpose(0, 1)
+    mask = (torch.triu(torch.ones(seq_len, seq_len) == 1).transpose(0, 1))
     mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
-    return mask
+    return mask.to(device)
 
 
-def generate_non_autoregressive_mask(seq_len):
+def generate_non_autoregressive_mask(seq_len, device):
     """
     Generates a mask for tgt to only attend to its own position when decoding. Masked positions are filled
     with float('-inf'), and unmasked positions with float(0.0).
     """
     mask = torch.eye(seq_len)
     mask = mask.masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
-    return mask
+    return mask.to(device)
 
 
 def flatten_tensor_batch(tensor):

@@ -29,9 +29,13 @@ class CompressionTransformer(nn.Module):
                  num_dec_layers=3,
                  z_centroids=None,
                  pareto_alpha=1.16,
-                 pareto_interval=0.3
+                 pareto_interval=0.3,
+                 cuda_backend=False
                  ):
         super().__init__()
+
+        self.cuda_backend = cuda_backend
+        self.device = torch.device("cuda:0" if cuda_backend else "cpu")
 
         self.d_model = d_model
         self.position_embedding = PositionEmbedding2D(d_model)
@@ -46,7 +50,7 @@ class CompressionTransformer(nn.Module):
         # The shape is updated in each forward pass to not have to give it as an argument in other functions
         self.z_shape = None  # ~ B x D x H x W
         self.z_centroids = z_centroids
-        self.arange = torch.arange(len(z_centroids), dtype=torch.float)
+        self.arange = torch.arange(len(z_centroids), dtype=torch.float, device=self.device)
 
         # Symbol centroids
         initial_centroids = torch.linspace(-4., 4., num_centroids)
@@ -115,11 +119,12 @@ class CompressionTransformer(nn.Module):
 
         b, d, h, w = self.z_shape
 
-        tgt = torch.zeros((b, d, h, w))
+        tgt = torch.zeros((b, d, h, w), device=self.device)
         tgt = self.position_embedding(tgt)
         tgt = utils.flatten_tensor_batch(tgt)
 
-        tgt_mask = utils.generate_subsequent_mask(seq_len=int(h * w))  # generate z_tilde autoregressively
+        # generate z_tilde autoregressively so this mask is needed
+        tgt_mask = utils.generate_subsequent_mask(seq_len=int(h * w), device=self.device)
 
         z_real = self.decoder(tgt, c, tgt_mask, memory_key_padding_mask=memory_mask)
         z_real = utils.unravel_tensor_batch(z_real, self.z_shape)  # HW x B x D --> B x D x H x W
@@ -143,16 +148,14 @@ class CompressionTransformer(nn.Module):
         # k ~ B
         # todo: Is detach() needed here? k is already detached in sample_k(mu)..
 
-        k = k.detach()
-
         b, d, h, w = self.z_shape
-        mask_from_index = (k * (d * h * w)).to(int).unsqueeze(1)  # B x 1
-        mask = ~torch.arange(d * h * w).repeat(b, 1).ge(mask_from_index)  # B x DHW
+        mask_from_index = (k * (d * h * w)).to(int).unsqueeze(1).to(self.device)  # B x 1
+        mask = ~torch.arange(d * h * w, device=self.device).repeat(b, 1).ge(mask_from_index)  # B x DHW
         mask = mask.view(b, h * w, d).permute(1, 0, 2)  # HW x B x D, reshaped to format of c
         c_masked = c * mask
 
-        # mask for the transformer decoder to know which elements in the sequence that are masked
-        memory_mask = torch.arange(h * w).unsqueeze(0).ge(torch.ceil(mask_from_index / float(d)))  # B x HW
+        # mask for the transformer decoder to know which elements in the sequence that are masked, B x HW
+        memory_mask = torch.arange(h * w, device=self.device).unsqueeze(0).ge(torch.ceil(mask_from_index / float(d)))
         return c_masked, memory_mask
 
     def sample_k(self, mu):
@@ -193,12 +196,11 @@ class CompressionTransformer(nn.Module):
         returns a random sample form this distribution
     '''
     def sample_bounded_pareto(self, size, a, l, h):
-        # if self.cuda_backend:
-        #     u = torch.cuda.FloatTensor(size).uniform_()
-        # else:
-        #     u = torch.FloatTensor(size).uniform_()
+        if self.cuda_backend:
+            u = torch.cuda.FloatTensor(size).uniform_()
+        else:
+            u = torch.FloatTensor(size).uniform_()
 
-        u = torch.FloatTensor(size).uniform_()
         num = (u * torch.pow(h, a) - u * torch.pow(l, a) - torch.pow(h, a))
         den = (torch.pow(h, a) * torch.pow(l, a))
         x = torch.pow(- num / den, (-1. / a))
@@ -208,7 +210,6 @@ class CompressionTransformer(nn.Module):
         """
         Initialize parameters in the transformer model.
         """
-
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
@@ -252,7 +253,7 @@ class MuEncoderLayer(nn.Module):
         Pad x with zeros in the channel dimension to allow for skip connection
         """
         hw, b, d = x.shape
-        return torch.cat((x, torch.zeros(hw, b, 1)), dim=2)
+        return torch.cat((x, torch.zeros(hw, b, 1).to(x.device)), dim=2)
 
 
 class PositionEmbedding2D(nn.Module):
@@ -273,7 +274,8 @@ class PositionEmbedding2D(nn.Module):
         pos_y = y_embed.unsqueeze(dim=3) / dim_t
         pos_x = torch.stack((pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4).flatten(3)
         pos_y = torch.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
-        self.pos_embedding = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
+        pos_embedding = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
+        self.register_buffer('pos_embedding', pos_embedding)  # so that this tensor is moved to device properly
 
     def forward(self, src):
         b, _, h, w = src.shape
@@ -421,13 +423,15 @@ def main():
 
     if len(sys.argv) == 1:
         print('Local run!')
-        threshold = 0.6
+        threshold = 0.95
         gamma = 0.1
+        batch_size = 4
         local = True
     else:
         print('Running script @' + sys.argv[1])
         threshold = float(sys.argv[2])
         gamma = float(sys.argv[3])
+        batch_size = 24  # the whole test set
         local = False
 
     torch.manual_seed(1234)
@@ -452,9 +456,9 @@ def main():
                                     transforms.ToTensor()])
 
     dataset = datasets.ImageFolder(root=path_to_testset, transform=transform)
-    loader = DataLoader(dataset=dataset, batch_size=4, shuffle=False)
+    loader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=False)
 
-    # take first 4 images
+    # take first 4 or 24 images
     img, _ = next(iter(loader))
     img = img.to(device)
 
@@ -467,7 +471,8 @@ def main():
     pareto_alpha = 1.16
     pareto_interval = 0.5
 
-    net = Net(min_accuracy, colors, model_depth, model_size, n, L, cuda_backend, pareto_interval, pareto_alpha)
+    net = Net(min_accuracy, colors, model_depth, model_size, n, L,
+              cuda_backend, pareto_interval, pareto_alpha).to(device)
 
     net.load_state_dict(torch.load(path_to_model, map_location=device), strict=False)
 
@@ -481,14 +486,16 @@ def main():
     num_layers = 6
     num_centroids = 8
     num_enc_layers = num_dec_layers = num_layers
+    pareto_interval_transf = 0.3
 
     model = CompressionTransformer(model_size, nhead, d_ff, dropout, num_centroids,
-                                   num_enc_layers, num_dec_layers, z_centroids).to(device)
+                                   num_enc_layers, num_dec_layers, z_centroids, pareto_alpha,
+                                   pareto_interval_transf, cuda_backend).to(device)
 
     optimizer = optim.AdamW(model.parameters(), lr=0.0003)
 
     # model_name = f'pareto_mask_nhead_{nhead}_dff_{d_ff}_encdeclayers_{num_enc_layers}_Kodak_first_4'
-    model_name = f'pareto_gamma_{gamma}_threshold_{threshold}_4kodak'
+    model_name = f'pareto_decoderMask_gamma_{gamma}_threshold_{threshold}_kodak'
 
     writer = SummaryWriter(logdir + model_name)
     # writer = None
