@@ -271,12 +271,20 @@ def main():
     model_name = f'transformer_gamma_{gamma}_threshold_{threshold}'
     writer = SummaryWriter(logdir + model_name)
 
+    idx_t = 0
     EPOCHS = 10
     for epoch in range(EPOCHS):
 
-        train_one_epoch(net=net,
-                        transformer=model,
-                        )
+        idx_t = train_one_epoch(net,
+                                model,
+                                train_loader,
+                                test_loader,
+                                optimizer,
+                                loss,
+                                gamma,
+                                idx_t,
+                                writer,
+                                device)
 
     if local:
         save_path = './models/' + model_name + '.pt'
