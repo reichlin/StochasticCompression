@@ -203,7 +203,7 @@ def main():
         logdir = './runs/'
     else:
         test_folder = '/local_storage/datasets/KODAK'
-        path_to_model = '/Midgard/home/arechlin/compression/models/best_final_model_97.6.pt'
+        path_to_model = '/Midgard/home/areichlin/compression/models/best_final_model_97.6.pt'
         logdir = '/Midgard/home/areichlin/compression/alex/transformer/logs/'
 
         if sys.argv[1] == "khazadum":
