@@ -81,11 +81,9 @@ class CompressionTransformer(nn.Module):
         c_k, memory_mask_k = self.mask(c, k)
         c_compress, memory_mask_compress = self.mask(c, k_compress)
 
-        # z_logits = self.decode(c)
         z_logits_k = self.decode(c_k, memory_mask_k)
         z_logits_compress = self.decode(c_compress, memory_mask_compress)
 
-        # z_rec = self.z_centroids[z_logits.argmax(dim=1)].detach()  # mask the same way z is masked?
         z_rec_k = self.z_centroids[z_logits_k.argmax(dim=1)].detach()  # mask the same way z is masked
         z_rec_compress = self.z_centroids[z_logits_compress.argmax(dim=1)].detach()  # mask the same way z is masked
 
@@ -287,10 +285,9 @@ class PositionEmbedding2D(nn.Module):
 
 class TransformerLoss:
 
-    def __init__(self, z_centroids, threshold=0.98, flip_sign=False):
+    def __init__(self, z_centroids, threshold=0.98):
         self.threshold = threshold
         self.z_centroids = z_centroids
-        self.flip_sign = flip_sign
 
     def __call__(self, z, z_rec_compress, z_logits_compress, k, log_pk):
 
@@ -302,32 +299,7 @@ class TransformerLoss:
         z_target[mask] = -1  # set the masked elements to -1 and ignore that in the loss calc.
         loss_ce = F.cross_entropy(z_logits_compress, z_target, ignore_index=-1)
 
-        loss_pg = policy_loss * (k * log_pk).mean()
-
-        if self.flip_sign:
-            loss_pg = -loss_pg
-
-        # gamma = 1.5
-        # loss = loss_ce + gamma * mewtwo.mean()
-        # policy_loss = False
-
-        return loss_ce, loss_pg, policy_loss
-
-    def old__call__(self, z, z_rec_k, z_logits_k, k_2, log_pk_2):
-
-        mask = (z == 0)
-        accuracy = (z == z_rec_k).sum(dtype=torch.float) / (mask.shape.numel() - mask.sum())
-        policy_loss = (accuracy > self.threshold).detach()
-
-        z_target = (z.unsqueeze(0) - self.z_centroids.view(-1, 1, 1, 1, 1)).abs().argmin(dim=0)
-        z_target[mask] = -1  # set the masked elements to -1 and ignore that in the loss calc.
-        loss_ce = F.cross_entropy(z_logits_k, z_target, ignore_index=-1)
-
-        loss_pg = policy_loss * (k_2 * log_pk_2).mean()
-
-        # gamma = 1.5
-        # loss = loss_ce + gamma * mewtwo.mean()
-        # policy_loss = False
+        loss_pg = policy_loss * (k * log_pk).mean()  # k sampled from poisson, R = -k
 
         return loss_ce, loss_pg, policy_loss
 
@@ -446,8 +418,8 @@ def main():
         logdir = './runs/'
     else:
         path_to_testset = '/local_storage/datasets/KODAK'
-        path_to_model = '?'
-        logdir = '/Midgard/home/areichlin/compression/transformer/'
+        path_to_model = '/Midgard/home/arechlin/compression/models/best_final_model_97.6.pt'
+        logdir = '/Midgard/home/areichlin/compression/alex/transformer/logs/'
 
     ##################################################
 
@@ -458,7 +430,7 @@ def main():
     dataset = datasets.ImageFolder(root=path_to_testset, transform=transform)
     loader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=False)
 
-    # take first 4 or 24 images
+    # take first 'batch_size' images
     img, _ = next(iter(loader))
     img = img.to(device)
 
